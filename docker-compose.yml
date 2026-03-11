@@ -1,0 +1,265 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────
+# ETRM Sandbox — Apple Silicon (ARM64) compatible
+# Run: docker compose up -d
+# Stop: docker compose down
+# Wipe volumes: docker compose down -v
+# ─────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── SQL Server (ARM64-compatible via Azure SQL Edge) ──────────
+  mssql:
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    platform: linux/arm64
+    container_name: etrm-mssql
+    ports:
+      - "1433:1433"
+    environment:
+      ACCEPT_EULA: "1"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:-YourStr0ngPass1}"
+      MSSQL_PID: "Developer"
+    volumes:
+      - mssql_data:/var/opt/mssql
+      - ./scripts/init_mssql.sql:/docker-entrypoint-initdb.d/init_mssql.sql
+    healthcheck:
+      # Azure SQL Edge doesn't bundle sqlcmd — use a TCP port check instead
+      test: bash -c "cat /dev/null > /dev/tcp/localhost/1433" 2>/dev/null && echo ok || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── ClickHouse ────────────────────────────────────────────────
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    platform: linux/arm64   # ARM64 native — avoids QEMU inter-container TCP resets with Superset
+    container_name: etrm-clickhouse
+    ports:
+      - "8123:8123"   # HTTP interface (DBeaver, curl)
+      - "9000:9000"   # Native TCP (Go driver)
+    environment:
+      CLICKHOUSE_DB: etrm
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./scripts/init_clickhouse.sql:/docker-entrypoint-initdb.d/init_clickhouse.sql
+      - ./infra/clickhouse/config.xml:/etc/clickhouse-server/config.d/custom.xml
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1500M
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+  # ── Zookeeper (required by Kafka) ────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    platform: linux/amd64
+    container_name: etrm-zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_log:/var/lib/zookeeper/log
+    healthcheck:
+      test: echo ruok | timeout 5 bash -c "cat > /dev/tcp/localhost/2181" && echo "ok" || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Kafka ─────────────────────────────────────────────────────
+  # IMPORTANT: Two listeners configured:
+  #   - PLAINTEXT://kafka:29092  → used by other Docker containers (Go service, scraper)
+  #   - PLAINTEXT_HOST://localhost:9092 → used by tools on your Mac (DBeaver, kafka-cli)
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    platform: linux/amd64
+    container_name: etrm-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: kafka-topics --bootstrap-server localhost:9092 --list
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── Redis ─────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    platform: linux/arm64   # Redis has native ARM64 image
+    container_name: etrm-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: redis-cli ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Prometheus ────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.49.0
+    platform: linux/arm64   # Prometheus has native ARM64
+    container_name: etrm-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:9090/-/healthy || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Grafana ───────────────────────────────────────────────────
+  # GF_INSTALL_PLUGINS pre-installs the ClickHouse datasource plugin
+  grafana:
+    image: grafana/grafana:10.3.1
+    platform: linux/arm64   # Grafana has native ARM64
+    container_name: etrm-grafana
+    depends_on:
+      - prometheus
+      - clickhouse
+      - mssql
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: "${GF_SECURITY_ADMIN_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GF_SECURITY_ADMIN_PASSWORD:-admin}"
+      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── LocalStack (fake AWS: S3 only on free tier) ───────────────
+  # NOTE: VPC/EC2 require LocalStack Pro — skipped, S3 only
+  localstack:
+    image: localstack/localstack:3.1
+    platform: linux/arm64   # LocalStack has native ARM64
+    container_name: etrm-localstack
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: s3
+      DEFAULT_REGION: ap-southeast-1
+      DEBUG: "0"
+      TMPDIR: /localstack-tmp
+    volumes:
+      - localstack_data:/var/lib/localstack
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: curl -s http://localhost:4566/_localstack/health | grep '"s3"' || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  # ── Apache Superset (Power BI-style BI tool, browser-based) ──────
+  # Access at http://localhost:8088  admin / admin
+  # Connects to MSSQL + ClickHouse using the views in scripts/powerbi_views_*.sql
+  superset:
+    image: apache/superset:3.1.0
+    platform: linux/amd64
+    container_name: etrm-superset
+    depends_on:
+      - mssql
+      - clickhouse
+    ports:
+      - "8088:8088"
+    environment:
+      SUPERSET_SECRET_KEY: "etrm_superset_secret_key_change_in_prod"
+      SUPERSET_LOAD_EXAMPLES: "no"
+    volumes:
+      - superset_data:/app/superset_home
+      - ./infra/superset/superset_init.sh:/superset_init.sh
+    command: >
+      bash -c "
+        pip install --quiet clickhouse-connect pymssql &&
+        superset db upgrade &&
+        superset fab create-admin
+          --username admin
+          --firstname Admin
+          --lastname User
+          --email admin@etrm.local
+          --password admin 2>/dev/null || true &&
+        superset init &&
+        /superset_init.sh &
+        superset run -h 0.0.0.0 -p 8088 --with-threads --reload --debugger
+      "
+    healthcheck:
+      test: curl -sf http://localhost:8088/health || exit 1
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+
+# ── Volumes ───────────────────────────────────────────────────────
+volumes:
+  mssql_data:
+  clickhouse_data:
+  zookeeper_data:
+  zookeeper_log:
+  kafka_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+  localstack_data:
+  superset_data:
+
+# ── Networks (default bridge is fine for sandbox) ─────────────────
+# All services are on the default network and can reach each other
+# by container name (e.g. kafka:29092, mssql:1433, clickhouse:8123)

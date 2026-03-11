@@ -1,0 +1,13 @@
+<clickhouse>
+    <!-- Listen on all interfaces so Grafana/Go service can connect -->
+    <listen_host>0.0.0.0</listen_host>
+
+    <!-- Conservative memory for Docker Desktop (3.8GB total allocated) -->
+    <max_server_memory_usage_to_ram_ratio>0.4</max_server_memory_usage_to_ram_ratio>
+
+    <!-- Reduce log noise -->
+    <logger>
+        <level>warning</level>
+        <console>1</console>
+    </logger>
+</clickhouse>
