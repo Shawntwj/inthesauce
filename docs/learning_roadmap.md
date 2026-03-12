@@ -176,11 +176,13 @@ The databases don't know what a "trade" means. The Go service knows the rules: "
 - **Credit check**: before accepting a trade, check `SUM(open_notional) < credit_limit`
 
 ### Exercises
-1. Read `cmd/server/main.go` — trace how an HTTP request flows through the service
-2. Call the API: `curl http://localhost:8080/trades` — see the response
-3. Call: `curl http://localhost:8080/pnl/1` — understand the P&L breakdown
-4. Add a new REST endpoint: `GET /counterparties` that returns all counterparties from MSSQL
-5. Write a new trade via API and watch it appear in Superset
+> **Note:** The Go service is not yet built in this sandbox. These exercises are for when you build it (see IMPLEMENTATION_PLAN.md Day 2). For now, focus on understanding the business logic by studying the seed data and SQL queries.
+
+1. Study `scripts/init_clickhouse.sql` — see how trades are exploded into half-hour intervals (the SQL does what the Go service would do)
+2. Run the P&L queries from `docs/clickhouse_queries.md` Pattern 3 — understand the COALESCE fallback
+3. Run the credit exposure query from `docs/sql_query_cookbook.md` — understand the credit check logic
+4. Trace the full lifecycle manually: pick a trade in MSSQL, find its intervals in ClickHouse, calculate its P&L by hand
+5. **Future:** When you build the Go service, implement the trade ingestion → explosion → P&L pipeline
 
 ---
 
@@ -200,12 +202,12 @@ In production, something is always broken at 3am. Grafana alerts wake the on-cal
 - How are Grafana datasources provisioned? (read `infra/grafana/provisioning/`)
 
 ### Exercises
+See **Lab 6 — Grafana & Prometheus Monitoring** (`docs/labs/lab6_monitoring.md`) for the full hands-on walkthrough.
 1. Open Grafana at `http://localhost:3000` (admin/admin)
 2. Open Prometheus at `http://localhost:9090` — run `up` to see what's being scraped
-3. In Prometheus, run: `clickhouse_active_queries` — see ClickHouse activity
-4. In Grafana, open the existing dashboards and understand each panel
-5. Add a new Grafana panel: "Total rows in transaction_exploded" (SQL panel, ClickHouse source)
-6. Set up a Grafana alert: notify if `kafka_consumer_lag > 100`
+3. In Prometheus, run: `ClickHouseProfileEvents_Query` — see ClickHouse activity
+4. Build a dashboard with panels from Prometheus + ClickHouse + MSSQL
+5. Set up a Grafana alert rule with a threshold and duration
 
 ---
 
@@ -262,39 +264,34 @@ Superset and Power BI are for business users — traders, risk managers, finance
 
 ### Week 1 — Get Comfortable With What's Running
 - [ ] Read `docker-compose.yml` end to end — understand every service
-- [ ] Connect DBeaver to MSSQL and ClickHouse — run the 4 key queries
+- [ ] **Lab 1** — Databases: connect DBeaver, run queries, understand MSSQL vs ClickHouse
+- [ ] Read `docs/etrm_concepts.md` — understand the trading domain
 - [ ] Explore Superset: SQL Lab, both dashboards, chart builder
-- [ ] Explore Grafana: understand each panel, what data it shows
 - [ ] Run `make help` — understand every Makefile command
 
-### Week 2 — Break and Rebuild
-- [ ] Stop a container mid-stream, see what breaks, restart it
-- [ ] Add a new counterparty to MSSQL, verify it shows in Superset
-- [ ] Add a new Grafana panel (ClickHouse datasource, query `etrm.vw_pnl_daily`)
-- [ ] Read the Go service code — trace one trade from API call to ClickHouse
-- [ ] Write a new Superset chart from scratch (any data you find interesting)
+### Week 2 — Messaging + Reporting
+- [ ] **Lab 2** — Kafka: topics, consumer lag, publish/consume messages
+- [ ] **Lab 3** — Superset: build a business report from scratch
+- [ ] Read `docs/kafka_guide.md` and `docs/clickhouse_queries.md` cover to cover
+- [ ] Read `docs/sql_query_cookbook.md` — run every query, understand the results
 
-### Week 3 — Go Service + Kafka
-- [ ] Add a `GET /counterparties` endpoint to the Go service
-- [ ] Publish a message to `trade.events` manually, watch the Go service consume it
-- [ ] Write a new Go handler that queries ClickHouse directly
-- [ ] Understand the P&L calculation code — trace `realized_pnl` computation
+### Week 3 — Infrastructure + Monitoring
+- [ ] **Lab 5** — Terraform: provision S3, modify config, understand IaC
+- [ ] **Lab 6** — Grafana & Prometheus: build dashboards, set up alerts
+- [ ] **Lab 8** — Networking: VPC concepts, subnet design, security groups
+- [ ] Study `init_clickhouse.sql` — understand why `ReplacingMergeTree` over `MergeTree`
 
-### Week 4 — Power BI (once VM is set up)
-- [ ] Follow `docs/powerbi_setup.md` — connect to MSSQL
-- [ ] Build a Trade Blotter report: table of all trades with counterparty names
-- [ ] Build a P&L card: one big number showing total realized P&L
-- [ ] Create a relationship in the data model: `trade` ↔ `trade_component`
-- [ ] Write 3 DAX measures: Total Notional, Trade Count, Avg Contracted Price
-- [ ] Add a slicer to filter by counterparty
-- [ ] Publish to Power BI Service (browser)
-
-### Week 5 — Production Concepts
-- [ ] Study the `init_clickhouse.sql` — understand why `ReplacingMergeTree` over `MergeTree`
-- [ ] Study Terraform: add a new S3 bucket, apply it, verify in LocalStack
-- [ ] Read `.github/workflows/ci.yml` — understand the CI pipeline
+### Week 4 — CI/CD + P&L Investigation
+- [ ] **Lab 7** — GitHub Actions: build a CI pipeline, break it, fix it
+- [ ] **Lab 4** — P&L Investigation: simulate a real trader query
+- [ ] Trace the full trade lifecycle manually: MSSQL trade → ClickHouse intervals → P&L → invoice
 - [ ] Research: what is VaR? How would you calculate it from `transaction_exploded`?
-- [ ] Research: what is a PPA (Power Purchase Agreement)? See `ppa_production` table.
+
+### Week 5 — Power BI + Advanced Topics (optional)
+- [ ] Follow `docs/powerbi_setup.md` if you have a Windows VM — connect to MSSQL
+- [ ] Build a Trade Blotter report in Power BI with DAX measures (see `docs/powerbi_dax_measures.md`)
+- [ ] Research: what is a PPA (Power Purchase Agreement)? See `ppa_production` table
+- [ ] Research: APAC market specifics — Australian NEM dispatch, JEPX bidding, NZEM hydro
 
 ---
 
