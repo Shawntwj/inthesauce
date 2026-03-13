@@ -110,7 +110,7 @@ After loading all tables, set up these relationships in **Model view**:
 vw_trade_blotter          ──(trade_id)──►  vw_pnl_by_trade
 vw_trade_blotter          ──(trade_id)──►  vw_invoice_status
 vw_trade_blotter          ──(trade_id)──►  vw_trade_intervals_flat
-vw_counterparty_exposure  ──(counterparty_id)──►  vw_trade_blotter
+vw_counterparty_exposure  ──(counterparty_mdm_id)──►  vw_trade_blotter
 vw_market_prices_latest   ──(area_id)──►  vw_trade_blotter
 ```
 
@@ -142,12 +142,12 @@ vw_market_prices_latest   ──(area_id)──►  vw_trade_blotter
 
 ### Page 4 — Credit & Exposure
 - **Gauge visual**: utilisation_pct per counterparty (from `vw_counterparty_exposure`)
-- **Bar chart**: total_exposure vs credit_limit by counterparty_name
-- **Table**: counterparty_name, open_trade_count, total_exposure, remaining_headroom
+- **Bar chart**: total_exposure vs credit_limit by counterparty_mdm_id (credit limits come from MDM Postgres `golden_record` table)
+- **Table**: counterparty_mdm_id, open_trade_count, total_exposure, remaining_headroom
 
 ### Page 5 — Invoice Matching
 - **Donut chart**: count by status (PENDING / MATCHED / ERROR) (from `vw_invoice_status`)
-- **Table**: invoice_number, trade_ref, counterparty_name, amount, matched_amount, match_status, days_overdue
+- **Table**: invoice_number, trade_ref, counterparty_mdm_id, amount, matched_amount, match_status, days_overdue
 - **Conditional formatting**: highlight rows where match_status = 'MISMATCH' in red
 
 ---

@@ -40,3 +40,17 @@ datasources:
     jsonData:
       encrypt: disable
       authenticationType: SQL Server Authentication
+
+  # ── MDM Postgres (counterparty golden records) ───────────────
+  - name: MDM Postgres
+    type: postgres
+    uid: mdm-postgres
+    url: mdm-postgres:5432
+    access: proxy
+    database: mdm
+    user: mdm
+    secureJsonData:
+      password: "mdmpass"
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1600

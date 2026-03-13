@@ -185,6 +185,56 @@ This is JSON. In production, this file is stored remotely (S3 + DynamoDB for loc
 
 ---
 
+## Part F — State Drift: The #1 IaC Problem (10 min)
+
+State drift happens when someone changes infrastructure manually (via console or CLI) without updating Terraform. This is the most common real-world IaC issue.
+
+### Task F1: Create drift intentionally
+
+```bash
+# Create a bucket manually via AWS CLI — Terraform doesn't know about it
+aws --endpoint-url=http://localhost:4566 s3 mb s3://etrm-rogue-bucket
+```
+
+Now run:
+```bash
+terraform plan
+```
+
+**Observation:** Terraform says "No changes." It doesn't know about `etrm-rogue-bucket` because it's not in the state file. This bucket is *invisible* to Terraform — it exists in AWS but not in code. This is drift.
+
+### Task F2: Understand why drift is dangerous
+
+In production:
+- Someone creates a security group via the AWS console to unblock themselves
+- It has `0.0.0.0/0` ingress (open to the internet)
+- Terraform doesn't know about it, so no one reviews it
+- 3 months later, an attacker discovers it
+
+**The rule:** Never create infrastructure outside of Terraform. If you must make an emergency change, immediately add it to Terraform (`terraform import`) so it's tracked.
+
+### Task F3: Import a drifted resource
+
+Add this block to `main.tf`:
+```hcl
+resource "aws_s3_bucket" "rogue" {
+  bucket = "etrm-rogue-bucket"
+}
+```
+
+Then import it:
+```bash
+terraform import aws_s3_bucket.rogue etrm-rogue-bucket
+terraform plan  # should now show "No changes"
+```
+
+Clean up — remove the `rogue` block from `main.tf`, then:
+```bash
+terraform apply -auto-approve
+```
+
+---
+
 ## Checkpoint: What You Should Be Able to Do
 
 - [ ] Explain what Infrastructure as Code means and why firms use it
@@ -194,12 +244,14 @@ This is JSON. In production, this file is stored remotely (S3 + DynamoDB for loc
 - [ ] Remove a resource and apply to destroy it
 - [ ] Use AWS CLI to interact with S3 buckets (upload, download, list)
 - [ ] Explain what `terraform.tfstate` is and why it matters
+- [ ] Explain what state drift is and why it's dangerous
+- [ ] Use `terraform import` to adopt a manually-created resource
 
 ---
 
 ## Reflection Questions
 
-1. **In production:** Your team uses Terraform to manage 50 S3 buckets, 3 VPCs, and an EKS cluster. A junior engineer manually creates an S3 bucket via the AWS console. What happens when you run `terraform apply`? (Answer: Terraform doesn't know about it — it's not in state. It won't manage or delete it, but it also won't show up in `terraform state list`. This is called "drift.")
+1. **In production:** Your team uses Terraform to manage 50 S3 buckets, 3 VPCs, and an EKS cluster. A junior engineer manually creates an S3 bucket via the AWS console. What happens when you run `terraform apply`? (Answer: Terraform doesn't know about it — it's not in state. It won't manage or delete it, but it also won't show up in `terraform state list`. This is called "drift." You saw this in Part F.)
 
 2. **On the job:** Someone asks you to add a new S3 bucket for compliance logs with 7-year retention. How would you do it? (Answer: Add a `aws_s3_bucket` + `aws_s3_bucket_lifecycle_configuration` resource to the Terraform config, set expiration to 2555 days, open a PR for review, merge, let CI/CD apply it.)
 

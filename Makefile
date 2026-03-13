@@ -1,4 +1,4 @@
-.PHONY: up down wipe nuke ps logs-mssql logs-kafka logs-clickhouse check-health s3-init clickhouse-init mssql-init init powerbi-views superset-up superset-logs superset-open
+.PHONY: up down wipe nuke ps logs-mssql logs-kafka logs-clickhouse logs-mdm check-health s3-init clickhouse-init mssql-init mssql-run-init mdm-init mdm-shell init powerbi-views superset-up superset-logs superset-open kafka-create-counterparty-topic
 
 # ── Start / stop ──────────────────────────────────────────────────
 up:
@@ -31,6 +31,9 @@ logs-clickhouse:
 logs-grafana:
 	docker compose logs -f grafana
 
+logs-mdm:
+	docker compose logs -f mdm-postgres
+
 # ── Health check all containers ───────────────────────────────────
 check-health:
 	@echo "=== Container health ==="
@@ -44,6 +47,9 @@ check-health:
 	@echo ""
 	@echo "=== Kafka topics ==="
 	@docker exec etrm-kafka kafka-topics --bootstrap-server localhost:9092 --list 2>/dev/null || echo "Kafka not ready yet"
+	@echo ""
+	@echo "=== MDM Postgres ==="
+	@docker exec etrm-mdm-postgres pg_isready -U mdm -d mdm 2>/dev/null || echo "MDM Postgres not ready"
 	@echo ""
 	@echo "=== LocalStack S3 ==="
 	@curl -s http://localhost:4566/_localstack/health | python3 -c "import sys,json; h=json.load(sys.stdin); print('s3:', h.get('services',{}).get('s3','?'))"
@@ -67,18 +73,54 @@ clickhouse-init:
 	@curl -s "http://localhost:8123/?query=SELECT+table,count()+FROM+etrm.market_data+GROUP+BY+table+UNION+ALL+SELECT+'mtm_curve',count()+FROM+etrm.mtm_curve"
 	@curl -s "http://localhost:8123/?query=SELECT+'market_data',count()+FROM+etrm.market_data+UNION+ALL+SELECT+'mtm_curve',count()+FROM+etrm.mtm_curve"
 
-# Run MSSQL DDL + seed data via DBeaver — print connection info
+# Run MSSQL DDL + seed data automatically via pymssql
+# Falls back to connection info if pymssql isn't installed
+mssql-run-init:
+	@echo "=== Running MSSQL init via pymssql ==="
+	@python3 -c "\
+	import pymssql, sys;\
+	conn = pymssql.connect(server='localhost', port=1433, user='sa', password='YourStr0ngPass1');\
+	conn.autocommit(True);\
+	cursor = conn.cursor();\
+	sql = open('scripts/init_mssql.sql').read();\
+	for batch in sql.split('\nGO\n'):\
+	    batch = batch.strip();\
+	    if batch and not batch.startswith('--'):\
+	        try:\
+	            cursor.execute(batch);\
+	        except Exception as e:\
+	            print(f'Batch warning: {e}', file=sys.stderr);\
+	conn.close();\
+	print('MSSQL init complete.');\
+	" 2>&1 || (echo ""; echo "pymssql not installed. Install with: pip3 install pymssql"; echo "Or use DBeaver — see 'make mssql-init' for connection info")
+
+# Print MSSQL connection info (for DBeaver / manual use)
 mssql-init:
 	@echo "=== MSSQL connection info ==="
 	@echo "  Open DBeaver → New Connection → SQL Server"
 	@echo "  Host: localhost  Port: 1433"
-	@echo "  Auth: SQL Server  User: sa  Pass: YourStr0ng!Pass"
+	@echo "  Auth: SQL Server  User: sa  Pass: YourStr0ngPass1"
 	@echo "  Then run: scripts/init_mssql.sql"
-
-# Full init: clickhouse + remind about mssql
-init: clickhouse-init mssql-init
 	@echo ""
-	@echo "Init complete. Run 'make check-health' to verify."
+	@echo "  Or run 'make mssql-run-init' to seed automatically (requires: pip3 install pymssql)"
+
+# Verify MDM Postgres golden_record seed data
+mdm-init:
+	@echo "=== MDM Postgres golden_record ==="
+	@docker exec etrm-mdm-postgres psql -U mdm -d mdm -c "SELECT mdm_id, canonical_name, short_code, credit_limit, currency FROM golden_record;"
+
+# Interactive MDM Postgres shell
+mdm-shell:
+	docker exec -it etrm-mdm-postgres psql -U mdm -d mdm
+
+# Create counterparty.updated Kafka topic (if auto-create didn't work)
+kafka-create-counterparty-topic:
+	docker exec etrm-kafka kafka-topics --create --bootstrap-server localhost:9092 --topic counterparty.updated --partitions 3 --replication-factor 1 2>/dev/null || true
+
+# Full init: clickhouse + mdm + mssql (auto-seeds all 3 databases)
+init: clickhouse-init mdm-init mssql-run-init
+	@echo ""
+	@echo "Init complete. All 3 databases seeded. Run 'make check-health' to verify."
 
 # ── Connect helpers ───────────────────────────────────────────────
 clickhouse-shell:
@@ -118,5 +160,5 @@ superset-open:
 
 # Publish a test trade event to Kafka
 kafka-test-trade:
-	echo '{"unique_id":"TEST-001","counterparty_id":1,"quantity":100,"price":11.5,"area_id":1}' | \
+	echo '{"unique_id":"TEST-001","counterparty_mdm_id":"MDM-001","quantity":100,"price":11.5,"area_id":1}' | \
 	docker exec -i etrm-kafka kafka-console-producer --bootstrap-server localhost:9092 --topic trade.events

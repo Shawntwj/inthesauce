@@ -15,7 +15,7 @@ Layer 6: Business Reporting (Superset / Power BI)   ← you are here
 Layer 5: Monitoring (Grafana / Prometheus)
 Layer 4: Go Service Layer (trade logic, APIs)
 Layer 3: Messaging (Kafka)
-Layer 2: Databases (MSSQL + ClickHouse)
+Layer 2: Databases (MSSQL + ClickHouse + MDM Postgres)
 Layer 1: Infrastructure (Docker, Terraform, LocalStack)
 ```
 
@@ -57,9 +57,10 @@ Energy trading firms use cloud infra (AWS/Azure) for scalability and disaster re
 ## Layer 2 — Databases
 
 ### What It Is
-Two databases with different jobs:
+Three databases with different jobs:
 - **MSSQL** — transactional, source of truth for trades (ACID, row-by-row updates)
 - **ClickHouse** — analytics, append-only time-series (fast aggregations, no updates)
+- **MDM Postgres** — master data management, source of truth for counterparty golden records (port 5432)
 
 ### Why It Exists
 You cannot use one database for both jobs in a real trading firm. MSSQL handles the "did this trade happen?" question. ClickHouse handles the "what is my P&L right now across 10,000 half-hour intervals?" question. Trying to do the latter in MSSQL would be too slow.
@@ -68,7 +69,7 @@ You cannot use one database for both jobs in a real trading firm. MSSQL handles 
 
 **MSSQL:**
 - What is a PRIMARY KEY, FOREIGN KEY, IDENTITY column?
-- What is a JOIN? Write a query that joins `trade` → `trade_component` → `counterparty`
+- What is a JOIN? Write a query that joins `trade` → `trade_component` (counterparty details come from MDM Postgres `golden_record` table via `counterparty_mdm_id`)
 - What is a transaction (`BEGIN TRAN`, `COMMIT`, `ROLLBACK`)?
 - What is an INDEX and why does it speed up queries?
 - What is a VIEW and why do we create flat views for reporting?
@@ -83,11 +84,11 @@ You cannot use one database for both jobs in a real trading firm. MSSQL handles 
 
 ### Key Queries to Write
 ```sql
--- 1. In DBeaver (MSSQL): show all trades with counterparty name and area
-SELECT t.unique_id, cp.name, tc.area_id, tc.quantity, tc.price, tc.start_date, tc.end_date
+-- 1. In DBeaver (MSSQL): show all trades with counterparty MDM ID and area
+SELECT t.unique_id, t.counterparty_mdm_id, tc.area_id, tc.quantity, tc.price, tc.start_date, tc.end_date
 FROM trade t
 JOIN trade_component tc ON tc.trade_id = t.trade_id
-JOIN counterparty cp ON cp.counterparty_id = t.counterparty_id
+-- Look up counterparty names from MDM Postgres: SELECT mdm_id, canonical_name FROM golden_record;
 
 -- 2. In DBeaver (ClickHouse): latest market price per area
 SELECT area_id, argMax(price, issue_datetime) AS latest_price
@@ -104,10 +105,10 @@ GROUP BY trade_id
 ```
 
 ### Exercises
-1. Open DBeaver, connect to MSSQL — browse all 7 tables
+1. Open DBeaver, connect to MSSQL — browse the trade tables
 2. Connect to ClickHouse (port 8123) — browse all 4 tables + 5 views
-3. Write and run each of the 4 key queries above
-4. Add a new counterparty row to MSSQL manually in DBeaver
+3. Connect to MDM Postgres (port 5432) — browse the `golden_record` table
+4. Write and run each of the 4 key queries above
 5. Query Superset SQL Lab (select ETRM MSSQL) — run the join query there
 
 ---
@@ -125,7 +126,7 @@ When a trade is created, 5 things need to happen: save to MSSQL, explode to Clic
 - What is a partition? What is an offset?
 - Why does Kafka need Zookeeper (or KRaft in newer versions)?
 - What is "at-least-once" delivery? What is idempotency?
-- What topics exist in this repo? (`trade.events`, `market.prices`, `settlement.run`, `pnl.calc`)
+- What topics exist in this repo? (`trade.events`, `market.prices`, `settlement.run`, `pnl.calc`, `counterparty.updated`)
 
 ### Exercises
 1. Run `docker exec -it etrm-kafka kafka-topics --list --bootstrap-server localhost:9092`
@@ -241,7 +242,7 @@ Superset and Power BI are for business users — traders, risk managers, finance
 ### What to Learn for Power BI (when VM is ready)
 1. **Get Data** → SQL Server → `host.docker.internal:1433` → etrm database
 2. **Power Query Editor** — transform data before loading (filter columns, rename, merge)
-3. **Data Model** — create relationships between tables (trade → trade_component → counterparty)
+3. **Data Model** — create relationships between tables (trade → trade_component; counterparty data comes from MDM Postgres via `counterparty_mdm_id`)
 4. **DAX measures** — calculated columns and measures. Start with:
    ```
    Total Notional = SUMX(trade_component, trade_component[quantity] * trade_component[price])
@@ -257,6 +258,33 @@ Superset and Power BI are for business users — traders, risk managers, finance
 3. In Superset: add that chart to the Trade Book dashboard
 4. When VM is ready: connect Power BI to MSSQL, build the same Trade Book dashboard
 5. In Power BI: create a DAX measure for `Total Notional` and display it as a card
+
+---
+
+## Lab Overview — All 15 Labs
+
+### Foundation (Labs 1-9) — Learn the Stack
+| Lab | Focus | Time | Skill Level |
+|-----|-------|------|-------------|
+| Lab 1 | Databases: MSSQL + ClickHouse + MDM Postgres | 45-60 min | Beginner |
+| Lab 2 | Kafka: Topics, Messages, Consumer Lag | 30 min | Beginner |
+| Lab 3 | Superset: Build a Business Report | 45-60 min | Beginner |
+| Lab 4 | P&L Investigation: End-to-End Scenario | 45 min | Intermediate |
+| Lab 5 | Terraform & Infrastructure as Code | 45 min | Beginner |
+| Lab 6 | Grafana & Prometheus Monitoring | 45-60 min | Intermediate |
+| Lab 7 | GitHub Actions CI/CD | 45 min | Intermediate |
+| Lab 8 | Networking: VPC, Subnets, Docker Networks | 30-40 min | Intermediate |
+| Lab 9 | MDM: Golden Records, Match/Merge, Survivorship, Data Quality | 75-90 min | Intermediate |
+
+### Advanced (Labs 10-15) — Become World-Class
+| Lab | Focus | Time | Skill Level |
+|-----|-------|------|-------------|
+| Lab 10 | Build the Go Trade Service from Scratch | 2-3 hours | Advanced |
+| Lab 11 | Incident Response: "The P&L is Wrong" | 60-90 min | Advanced |
+| Lab 12 | Performance Tuning: Making Queries 100x Faster | 60-90 min | Advanced |
+| Lab 13 | Settlement & Invoice Matching | 60-75 min | Advanced |
+| Lab 14 | Kafka Streaming Pipeline: Real-Time Market Data | 60-90 min | Advanced |
+| Lab 15 | System Design: Architect an ETRM from Scratch | 90-120 min | Staff/Principal |
 
 ---
 
@@ -287,11 +315,63 @@ Superset and Power BI are for business users — traders, risk managers, finance
 - [ ] Trace the full trade lifecycle manually: MSSQL trade → ClickHouse intervals → P&L → invoice
 - [ ] Research: what is VaR? How would you calculate it from `transaction_exploded`?
 
-### Week 5 — Power BI + Advanced Topics (optional)
+### Week 5 — Master Data Management (MDM Deep Dive)
+- [ ] **Lab 9** — MDM: golden records, match/merge, survivorship rules, data quality dimensions
+- [ ] Study the seed data in `incoming_record` — understand why each record got its match_status and score
+- [ ] Manually calculate a match score for an incoming record using the scoring table in Lab 9 Part C
+- [ ] Resolve both stewardship conflicts using survivorship rules (source priority, longest, manual)
+- [ ] Create a new golden record from the unmatched "Kansai Power Trading GK" entity
+- [ ] Measure data quality across the 6 dimensions (completeness, accuracy, consistency, timeliness, uniqueness, validity)
+- [ ] Trace the MDM-to-ETRM link: pick a trade in MSSQL → find its `counterparty_mdm_id` → look up the golden record in MDM Postgres
+- [ ] Publish a `counterparty.updated` Kafka event and consume it back
+- [ ] Explain the three MDM architecture styles (registry, consolidation, coexistence) and why we use coexistence
+- [ ] Answer: "What happens if the MDM service goes down? Can the trade service still book trades?"
+
+### Week 6 — Power BI + Settlement
 - [ ] Follow `docs/powerbi_setup.md` if you have a Windows VM — connect to MSSQL
-- [ ] Build a Trade Blotter report in Power BI with DAX measures (see `docs/powerbi_dax_measures.md`)
-- [ ] Research: what is a PPA (Power Purchase Agreement)? See `ppa_production` table
+- [ ] Build a Trade Blotter report in Power BI with DAX measures
+- [ ] **Lab 13** — Settlement & Invoice Matching: understand where the money flows
 - [ ] Research: APAC market specifics — Australian NEM dispatch, JEPX bidding, NZEM hydro
+
+### Week 7 — Build the Service Layer (World-Class Starts Here)
+- [ ] **Lab 10** — Build the Go Trade Service: REST API, trade explosion, dual-write to MSSQL + ClickHouse
+- [ ] **Lab 14** — Kafka Streaming Pipeline: build a real-time market data producer and consumer
+- [ ] Wire the trade service into docker-compose, test end-to-end
+- [ ] Add Prometheus metrics to your Go service (`/metrics` endpoint)
+
+### Week 8 — Production Readiness
+- [ ] **Lab 11** — Incident Response: simulate "the P&L is wrong" and fix it under time pressure
+- [ ] **Lab 12** — Performance Tuning: profile queries, add projections, optimize batch inserts
+- [ ] Add data quality checks (3-sigma anomaly detection on market prices)
+- [ ] Build Grafana alerts for P&L threshold breaches and stale market data
+
+### Week 9 — Architecture Mastery (Capstone)
+- [ ] **Lab 15** — System Design: design and present a complete ETRM architecture
+- [ ] Write a 1-page architecture document with trade-off analysis
+- [ ] Practice the 5-minute pitch for CTO, Head of Trading, CISO, and CFO audiences
+- [ ] Answer the hard interview questions (see Lab 15 Part D, Task D3)
+
+---
+
+## Skill Progression Map
+
+```
+Week 1-3: "I understand the components"
+    → Can query all databases, read Kafka topics, build dashboards
+    → Interview level: Junior/Graduate
+
+Week 4-6: "I understand the business"
+    → Can investigate P&L, trace trade lifecycle, explain settlement
+    → Interview level: Mid-level / Analyst
+
+Week 7-8: "I can build and operate it"
+    → Can write the service, build pipelines, handle incidents, tune performance
+    → Interview level: Senior / Staff Engineer
+
+Week 9: "I can design it"
+    → Can architect a full system, justify every decision, present to any audience
+    → Interview level: Staff / Principal / Architect
+```
 
 ---
 
@@ -304,19 +384,57 @@ These are the kinds of questions you'd get in an interview or on the job:
 - What happens if you forget `FINAL` on a ClickHouse query?
 - What is `issue_datetime` and why does every ClickHouse table have it?
 - How do you get the "latest" market price for a given datetime in ClickHouse?
+- What is a ClickHouse projection and when would you use one?
+- Why batch inserts matter in ClickHouse (parts, merges, performance)
 
 **Trading domain:**
 - What is the difference between realized and unrealized P&L?
 - What is mark-to-market (MTM)?
 - What is a STANDARD vs CONSTANT vs VARIABLE product?
-- What happens if a PHYSICAL trade is unbalanced?
+- What happens if a PHYSICAL trade is unbalanced? (imbalance charges)
 - What is invoice matching and why does it need a tolerance?
+- Walk me through the settlement process end-to-end
+- What is VWAP and why do traders care?
+
+**Service Layer:**
+- How does the trade explosion algorithm work?
+- What happens if MSSQL insert succeeds but ClickHouse insert fails?
+- How do you make a trade creation endpoint idempotent?
+- What metrics would you emit from a trade service?
+- How would you handle 10,000 trades/day vs 100?
 
 **Infrastructure:**
 - How does the Superset container reach the MSSQL container by hostname?
 - What is a Docker health check and why do we need them?
 - What would happen if ClickHouse ran out of disk space?
 - What does Kafka retain messages for, and what happens after that?
+- What is the difference between at-least-once and exactly-once delivery?
+
+**Incident Response:**
+- A trader says the P&L is wrong. Walk me through your investigation.
+- How do you fix bad data in ClickHouse if you can't DELETE?
+- What goes into a postmortem? Why write one?
+- How would you detect price anomalies automatically?
+
+**Master Data Management:**
+- What is a golden record and why does counterparty data need one?
+- Why did we extract the counterparty table from MSSQL into a separate MDM service?
+- How does the match/merge engine work? What are the three routing outcomes (AUTO_MERGE, QUEUE, NEW)?
+- What is stewardship and when is it needed?
+- Explain the five survivorship strategies (source priority, most recent, most frequent, longest, manual). When would you use each?
+- What is the difference between a false merge and a false separation? Which is worse in a regulated trading environment and why?
+- Name the six data quality dimensions and give an example of each in a counterparty MDM context.
+- What are the three MDM architecture styles (registry, consolidation, coexistence)? Which does our system use and why?
+- How does the ETRM trade service get counterparty data if it's no longer in MSSQL?
+- The MDM service goes down. Can the ETRM still book trades? What is the impact?
+- Your firm acquires another company with 300 counterparties. Walk through the MDM migration process.
+
+**System Design:**
+- Design an ETRM system for 3 APAC markets. What components would you use and why?
+- How would you ensure the morning P&L report runs in under 10 seconds?
+- What are the failure modes of your system and how does each one recover?
+- Why Go over Java/Rust for this use case? (Or: make the case for Java instead)
+- How would you secure this system? What network segmentation would you use?
 
 **BI / Reporting:**
 - What is the difference between Grafana and Superset?

@@ -1,20 +1,21 @@
-# ETRM Sandbox - 3-Day Implementation Plan
+# ETRM + MDM Sandbox - 3-Day Implementation Plan
 
 ## Project Overview
 
-A local sandbox that replicates a production Energy Trading & Risk Management (ETRM) stack. It runs ClickHouse + MSSQL databases with realistic energy trading data, a Kafka event pipeline, a Go service layer that handles trade lifecycle (P&L, MTM, settlement), Terraform-managed AWS-like infra (LocalStack), monitoring via Prometheus/Grafana, CI/CD via GitHub Actions, and a Power BI-compatible dashboard. The goal is to give you hands-on muscle memory with the exact tools and workflows you'll use on the job.
+A local sandbox that replicates a production Energy Trading & Risk Management (ETRM) stack with a Master Data Management (MDM) extension. It runs ClickHouse + MSSQL + MDM Postgres databases with realistic energy trading data, a Kafka event pipeline, a Go service layer that handles trade lifecycle (P&L, MTM, settlement), an MDM service for counterparty golden records with match/merge and stewardship, Terraform-managed AWS-like infra (LocalStack), monitoring via Prometheus/Grafana, CI/CD via GitHub Actions, and a Power BI-compatible dashboard. The goal is to give you hands-on muscle memory with the exact tools and workflows you'll use on the job.
 
 ---
 
 ## Technology Stack
 
 ### Databases
-- **ClickHouse** (yandex/clickhouse-server:latest) - Append-only analytics DB for market data, MTM curves, trade explosions
-- **MSSQL** (mcr.microsoft.com/mssql/server:2022-latest) - Transactional DB for trades, components, counterparties, invoices
-- **Redis** (redis:7-alpine) - Cache for live position snapshots
+- **ClickHouse** (clickhouse/clickhouse-server:24.3) - Append-only analytics DB for market data, MTM curves, trade explosions
+- **MSSQL** (mcr.microsoft.com/azure-sql-edge:latest) - Transactional DB for trades, components, invoices (counterparty moved to MDM)
+- **MDM Postgres** (postgres:16-alpine) - Master Data Management DB for counterparty golden records, incoming records, stewardship queue
+- **Redis** (redis:7-alpine) - Cache for live position snapshots + counterparty data from MDM via Kafka
 
 ### Message Broker
-- **Kafka** (confluentinc/cp-kafka:7.6.0) + **Zookeeper** (confluentinc/cp-zookeeper:7.6.0) - Event streaming for trade events, market data ingestion
+- **Kafka** (confluentinc/cp-kafka:7.6.0) + **Zookeeper** (confluentinc/cp-zookeeper:7.6.0) - Event streaming for trade events, market data ingestion, counterparty updates
 - **Kafka Connect** - Connectors for DB sync (ClickHouse <-> MSSQL)
 
 ### Cloud Infra
@@ -43,6 +44,11 @@ A local sandbox that replicates a production Energy Trading & Risk Management (E
 - **Go** - Service layer (trade ingestion, P&L calculation, MTM valuation, settlement)
 - **Rust** 🟡 MOCK - Noted as used in prod; sandbox uses Go stubs with same interfaces
 
+### MDM Layer
+- **Go** - MDM service (counterparty CRUD, ingest, match/merge engine, stewardship queue)
+- **MDM Postgres** - Golden records, incoming records, stewardship conflicts
+- **Kafka** - Publishes `counterparty.updated` events consumed by ETRM for Redis cache
+
 ---
 
 ## System Architecture
@@ -52,15 +58,18 @@ A local sandbox that replicates a production Energy Trading & Risk Management (E
 │   GRAFANA (port 3000)           │  │   SUPERSET (port 8088)           │
 │   Telemetry & ops dashboards    │  │   Business reporting dashboards  │
 │   Prometheus metrics, Kafka lag │  │   Trades | P&L | Market Data     │
+│   MDM stewardship dashboard     │  │                                  │
 └───────────────┬─────────────────┘  └──────────────┬───────────────────┘
-                │ HTTP / SQL queries (both connect to MSSQL + ClickHouse)
+                │ HTTP / SQL queries (MSSQL + ClickHouse + MDM Postgres)
 ┌───────────────▼──────────────────────────────────────────────────────┐
-│                      GO SERVICE LAYER (port 8080)                     │
+│                      GO TRADE SERVICE (port 8080)                     │
 │  - REST API: /trades, /positions, /pnl, /settlement                  │
 │  - Trade ingestion (Kafka consumer)                                  │
 │  - P&L engine (realized + unrealized)                                │
 │  - MTM valuation (mark-to-market / mark-to-model)                   │
 │  - Settlement & invoice matching                                     │
+│  - Credit check → calls MDM API for counterparty limits              │
+│  - Kafka consumer: counterparty.updated → Redis cache                │
 └──┬──────────────┬──────────────────┬─────────────────────────────────┘
    │              │                  │
    ▼              ▼                  ▼
@@ -71,20 +80,30 @@ A local sandbox that replicates a production Energy Trading & Risk Management (E
 │ Tables:  │ │ Tables:      │ │  - market.prices   │
 │ - trade  │ │ - market_data│ │  - settlement.run  │
 │ - comp.  │ │ - mtm_curve  │ │  - pnl.calc        │
-│ - cpty   │ │ - trade_expl │ └────────────────────┘
-│ - invoice│ │ - ppa_prod   │
-└──────────┘ └──────────────┘
-   │              │
-   ▼              ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                         S3 (LocalStack:4566)                          │
-│              Payload storage, curve files, audit logs                 │
-└──────────────────────────────────────────────────────────────────────┘
-   │
-   ▼
+│ - invoice│ │ - trade_expl │ │  - counterparty.   │
+│          │ │ - ppa_prod   │ │      updated       │
+└──────────┘ └──────────────┘ └──────┬─────────────┘
+   │              │                  │
+   ▼              ▼                  ▼
+┌──────────────────────────────┐ ┌─────────────────────────────────────┐
+│    S3 (LocalStack:4566)      │ │   MDM SERVICE (port 8081)           │
+│    Payload storage, curves,  │ │   - REST API: /counterparties       │
+│    audit logs                │ │   - Ingest + match/merge engine     │
+│                              │ │   - Stewardship queue               │
+│                              │ │   - Publishes counterparty.updated  │
+└──────────────────────────────┘ └──────────────┬──────────────────────┘
+                                                │
+                                                ▼
+                                 ┌─────────────────────────────┐
+                                 │  MDM POSTGRES (port 5432)    │
+                                 │  - golden_record             │
+                                 │  - incoming_record           │
+                                 │  - stewardship_queue         │
+                                 └─────────────────────────────┘
+
 ┌──────────────────────────────────────────────────────────────────────┐
 │  PROMETHEUS (9090) ──────────► GRAFANA (3000)                        │
-│  Scrapes: Go service, ClickHouse, MSSQL exporter, Kafka             │
+│  Scrapes: Go trade service, MDM service, ClickHouse, Kafka           │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -94,7 +113,7 @@ A local sandbox that replicates a production Energy Trading & Risk Management (E
 
 ### MSSQL — Transactional (Source of Truth)
 
-> These are the "five tables that can be touched" referenced in the notes.
+> Counterparty data has been moved to MDM Postgres. The trade table references MDM via `counterparty_mdm_id`.
 
 #### `trade`
 ```sql
@@ -105,7 +124,7 @@ CREATE TABLE trade (
     trade_at_utc        DATETIME2 NOT NULL,
     is_active           BIT DEFAULT 1,
     is_hypothetical     BIT DEFAULT 0,
-    counterparty_id     INT NOT NULL,
+    counterparty_mdm_id VARCHAR(50) NOT NULL,            -- references MDM golden_record.mdm_id
     broker_id           INT,
     clearer_id          INT,
     trader_id           INT NOT NULL,
@@ -152,17 +171,9 @@ CREATE TABLE delivery_profile (
 );
 ```
 
-#### `counterparty`
-```sql
-CREATE TABLE counterparty (
-    counterparty_id     INT IDENTITY PRIMARY KEY,
-    name                VARCHAR(200) NOT NULL,
-    short_code          VARCHAR(20) UNIQUE,
-    credit_limit        DECIMAL(18,2),                   -- max exposure
-    collateral_amount   DECIMAL(18,2) DEFAULT 0,
-    is_active           BIT DEFAULT 1
-);
-```
+#### ~~`counterparty`~~ → Moved to MDM Postgres
+
+> The counterparty table no longer exists in MSSQL. See **MDM Postgres** section below for the `golden_record` table.
 
 #### `invoice`
 ```sql
@@ -191,6 +202,56 @@ CREATE TABLE curve (
     area_id             INT NOT NULL,
     source              VARCHAR(50),                     -- 'EXCHANGE', 'IN_HOUSE'
     is_active           BIT DEFAULT 1
+);
+```
+
+### MDM Postgres — Counterparty Golden Records
+
+> Counterparty data lives here. The ETRM trade service fetches counterparty/credit data from the MDM service API.
+
+#### `golden_record`
+```sql
+CREATE TABLE golden_record (
+    mdm_id              VARCHAR(50) PRIMARY KEY,    -- e.g. 'MDM-001' — the canonical ID
+    canonical_name      VARCHAR(200) NOT NULL,
+    short_code          VARCHAR(20) UNIQUE,
+    credit_limit        DECIMAL(18,2),
+    collateral_amount   DECIMAL(18,2) DEFAULT 0,
+    currency            VARCHAR(10) DEFAULT 'JPY',
+    is_active           BOOLEAN DEFAULT TRUE,
+    data_steward        VARCHAR(100),               -- who owns this record
+    created_at          TIMESTAMPTZ DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+#### `incoming_record`
+```sql
+CREATE TABLE incoming_record (
+    record_id           SERIAL PRIMARY KEY,
+    source_system       VARCHAR(50) NOT NULL,       -- 'TRADING_DESK', 'BROKER_FEED', 'INVOICE_SYSTEM'
+    source_id           VARCHAR(50) NOT NULL,
+    raw_name            VARCHAR(200) NOT NULL,
+    credit_limit        DECIMAL(18,2),
+    received_at         TIMESTAMPTZ DEFAULT NOW(),
+    match_status        VARCHAR(20) DEFAULT 'PENDING', -- PENDING, AUTO_MERGED, QUEUED, NEW
+    matched_mdm_id      VARCHAR(50) REFERENCES golden_record(mdm_id),
+    match_score         DECIMAL(5,2)               -- 0-100 confidence
+);
+```
+
+#### `stewardship_queue`
+```sql
+CREATE TABLE stewardship_queue (
+    queue_id            SERIAL PRIMARY KEY,
+    record_a_id         INT REFERENCES incoming_record(record_id),
+    record_b_id         INT REFERENCES incoming_record(record_id),
+    conflict_fields     JSONB,                      -- e.g. {"credit_limit": [4000000, 5000000]}
+    status              VARCHAR(20) DEFAULT 'OPEN', -- OPEN, RESOLVED
+    resolved_by         VARCHAR(100),
+    resolution          JSONB,                      -- final values the steward picked
+    created_at          TIMESTAMPTZ DEFAULT NOW(),
+    resolved_at         TIMESTAMPTZ
 );
 ```
 
@@ -295,8 +356,10 @@ CREATE TABLE half_hour_intervals (
 ```go
 // Pseudo-code
 func IngestTrade(event TradeEvent) {
-    // 1. Validate trade fields (counterparty exists, area valid)
-    // 2. Insert into MSSQL: trade + trade_component rows
+    // 1. Validate trade fields (counterparty exists in MDM, area valid)
+    //    - Call MDM API: GET /counterparties/{mdm_id} to verify counterparty
+    //    - Run credit check against MDM credit limit
+    // 2. Insert into MSSQL: trade + trade_component rows (counterparty_mdm_id)
     // 3. Determine product type (STANDARD/CONSTANT/VARIABLE)
     //    - STANDARD: every hour, full day
     //    - CONSTANT: fixed window (e.g. 7am-3pm daily)
@@ -395,9 +458,10 @@ func RunSettlement(tradeID int, period DateRange) {
 
 ```go
 // Pseudo-code
-func CheckCreditLimit(counterpartyID int, newTradeValue float64) bool {
-    // 1. Get current exposure: SUM of open trade values for counterparty
-    // 2. Get credit_limit from counterparty table
+func CheckCreditLimit(counterpartyMDMID string, newTradeValue float64) bool {
+    // 1. Get current exposure: SUM of open trade values for counterparty from MSSQL
+    // 2. Get credit_limit from MDM API: GET /counterparties/{mdm_id}
+    //    (or read from Redis cache populated by counterparty.updated Kafka consumer)
     // 3. Return (current_exposure + newTradeValue) <= credit_limit
 }
 
@@ -419,6 +483,7 @@ Grafana dashboards:
 - **System Health**: pod status, DB connections, Kafka lag
 - **ClickHouse Queries**: slow query log, memory usage
 - **Invoice Matching**: error rates, mismatches
+- **MDM Stewardship**: golden record count, queue depth, match distribution, recent ingestions
 
 ### 8. Terraform / AWS (LocalStack)
 
@@ -501,17 +566,24 @@ jobs:
 - [ ] `terraform init && terraform apply` against LocalStack
 - [ ] Set up Prometheus scrape configs + import Grafana dashboard JSON
 
-**Done criteria:** `docker compose up` brings up everything. Can query both databases. Grafana shows system metrics. S3 buckets exist in LocalStack.
+- [ ] Verify MDM Postgres: `golden_record` table seeded with 3 counterparties
+- [ ] Create `counterparty.updated` Kafka topic
+
+**Done criteria:** `docker compose up` brings up everything. Can query all three databases (MSSQL, ClickHouse, MDM Postgres). `golden_record` seeded. `counterparty.updated` topic exists. Grafana shows system metrics. S3 buckets exist in LocalStack.
 
 ---
 
-### Day 2: Data + Trading Logic (Core ETRM)
+### Day 2: Data + Trading Logic (Core ETRM + MDM)
 
 **Morning (4 hrs):**
-- [ ] Bootstrap Go service: `services/trade-service/`
+- [ ] Bootstrap Go trade service: `services/trade-service/`
   - Kafka consumer for `trade.events` topic
-  - Trade ingestion: parse event -> insert MSSQL -> explode to ClickHouse
+  - Trade ingestion: parse event -> insert MSSQL (with `counterparty_mdm_id`) -> explode to ClickHouse
   - REST endpoints: `GET /trades`, `GET /trades/:id`, `POST /trades`
+- [ ] Bootstrap Go MDM service: `services/mdm-service/`
+  - REST API: `GET/POST /counterparties`, `GET /counterparties/:mdm_id`, `POST /counterparties/ingest`
+  - Stewardship: `GET /stewardship/queue`, `POST /stewardship/queue/:id/resolve`
+  - Match/merge engine (score + route: AUTO_MERGE / QUEUE / NEW)
 - [ ] Write trade explosion logic (break trade into half-hour intervals)
   - Left join delivery_profile + half_hour_intervals
   - Insert into ClickHouse `transaction_exploded`
@@ -527,10 +599,12 @@ jobs:
   - Generate invoice from delivered intervals
   - Basic match logic (exact amount match)
   - REST endpoint: `GET /settlement/:trade_id`
-- [ ] Credit check: simple exposure vs limit check on trade ingestion
+- [ ] Credit check: calls MDM API (`GET /counterparties/:mdm_id`) for credit limit instead of local MSSQL join
 - [ ] Kafka producer: synthetic market price generator (cron-like, every 30s publishes prices)
+- [ ] MDM Kafka publisher: publish `counterparty.updated` events when golden record changes
+- [ ] ETRM Kafka consumer: listen to `counterparty.updated`, cache counterparty data in Redis
 
-**Done criteria:** Can create a trade via API, see it exploded in ClickHouse, get P&L breakdown (realized + unrealized), generate an invoice, and see market prices flowing into ClickHouse.
+**Done criteria:** Can create a trade via API, see it exploded in ClickHouse, get P&L breakdown (realized + unrealized), generate an invoice, see market prices flowing into ClickHouse. MDM ingest with known name returns AUTO_MERGE. Ambiguous name lands in stewardship queue. Credit check calls MDM. `counterparty.updated` events appear in Kafka.
 
 ---
 
@@ -543,6 +617,7 @@ jobs:
   - Market Data (ClickHouse): price charts by area (JEPX/NEM/NZEM)
   - Invoice Matching: status breakdown (matched/error/pending)
   - System Health: Kafka consumer lag, DB query times
+  - MDM Stewardship (MDM Postgres datasource): golden record count, queue depth, match distribution, recent ingestions
 - [ ] Wire Grafana alerts: P&L threshold breach, invoice mismatch, Kafka lag > 1000
 
 **Afternoon (4 hrs):**
@@ -559,9 +634,15 @@ jobs:
   4. Run settlement for completed trades
   5. Check Grafana dashboards show everything
   6. Verify credit limits block over-limit trade
+- [ ] Run MDM end-to-end scenario:
+  1. `POST /counterparties/ingest {"source_system":"BROKER_FEED","raw_name":"TEC","credit_limit":4500000}` → AUTO_MERGE to MDM-001
+  2. `POST /counterparties/ingest {"source_system":"INVOICE_SYSTEM","raw_name":"Tokyo Energy","credit_limit":5000000}` → stewardship queue
+  3. `POST /stewardship/queue/1/resolve {"credit_limit":4750000}` → golden record updated, Kafka event published
+  4. Verify Redis cache reflects new credit limit
+  5. POST trade exceeding new limit → rejected
 - [ ] Document what you skipped (see section 10)
 
-**Done criteria:** Full end-to-end demo works. Grafana dashboards are populated and useful. CI pipeline runs. You can explain every component to an interviewer.
+**Done criteria:** Full end-to-end demo works for both ETRM and MDM flows. Grafana dashboards are populated (including MDM stewardship). CI pipeline runs. You can explain every component to an interviewer.
 
 ---
 
@@ -577,27 +658,45 @@ inthesauce/
 ├── Makefile                        # Convenience commands
 │
 ├── services/
-│   └── trade-service/              # Go service
-│       ├── Dockerfile
-│       ├── go.mod
-│       ├── go.sum
-│       ├── cmd/
-│       │   ├── server/main.go      # HTTP server + Kafka consumer
-│       │   ├── pnl/main.go         # P&L calculation (can be run as cron)
-│       │   ├── settlement/main.go  # Settlement runner
-│       │   └── seed/main.go        # Data seeder
-│       ├── internal/
-│       │   ├── models/             # Trade, Component, Counterparty structs
-│       │   ├── handlers/           # HTTP handlers
-│       │   ├── kafka/              # Kafka producer/consumer
-│       │   ├── db/                 # MSSQL + ClickHouse connections
-│       │   ├── pnl/               # P&L engine
-│       │   ├── settlement/        # Settlement + invoice logic
-│       │   ├── risk/              # Credit check, VaR stub
-│       │   └── exploder/          # Trade -> half-hour explosion
-│       └── tests/
-│
-├── services/
+│   ├── trade-service/              # Go service — ETRM core
+│   │   ├── Dockerfile
+│   │   ├── go.mod
+│   │   ├── go.sum
+│   │   ├── cmd/
+│   │   │   ├── server/main.go      # HTTP server + Kafka consumer
+│   │   │   ├── pnl/main.go         # P&L calculation (can be run as cron)
+│   │   │   ├── settlement/main.go  # Settlement runner
+│   │   │   └── seed/main.go        # Data seeder
+│   │   ├── internal/
+│   │   │   ├── models/             # Trade, Component structs
+│   │   │   ├── handlers/           # HTTP handlers
+│   │   │   ├── kafka/              # Kafka producer/consumer (incl. counterparty.updated)
+│   │   │   ├── db/                 # MSSQL + ClickHouse connections
+│   │   │   ├── pnl/               # P&L engine
+│   │   │   ├── settlement/        # Settlement + invoice logic
+│   │   │   ├── risk/              # Credit check (calls MDM API), VaR stub
+│   │   │   └── exploder/          # Trade -> half-hour explosion
+│   │   └── tests/
+│   │
+│   ├── mdm-service/                # Go service — Master Data Management
+│   │   ├── Dockerfile
+│   │   ├── go.mod
+│   │   ├── cmd/
+│   │   │   └── server/main.go      # HTTP server
+│   │   ├── internal/
+│   │   │   ├── models/
+│   │   │   │   └── counterparty.go # GoldenRecord, IncomingRecord structs
+│   │   │   ├── handlers/
+│   │   │   │   ├── counterparty.go # GET/POST/PUT /counterparties
+│   │   │   │   └── stewardship.go  # GET/POST /stewardship/queue
+│   │   │   ├── db/
+│   │   │   │   └── postgres.go     # Postgres connection
+│   │   │   ├── matcher/
+│   │   │   │   └── match.go        # Match/merge engine
+│   │   │   └── publisher/
+│   │   │       └── kafka.go        # Publishes counterparty.updated events
+│   │   └── tests/
+│   │
 │   └── scraper/                    # Market data generator
 │       ├── Dockerfile
 │       └── main.go                 # Publishes synthetic prices to Kafka
@@ -622,7 +721,8 @@ inthesauce/
 │   │       ├── pnl-monitor.json
 │   │       ├── market-data.json
 │   │       ├── invoice-matching.json
-│   │       └── system-health.json
+│   │       ├── system-health.json
+│   │       └── mdm-stewardship.json  # MDM golden records, queue depth, match distribution
 │   ├── superset/
 │   │   ├── superset_config.py      # Superset config (secret key, DB URI)
 │   │   └── superset_init.sh        # Bootstrap: admin user + DB connections
@@ -630,8 +730,9 @@ inthesauce/
 │       └── config.xml              # ClickHouse server config
 │
 ├── scripts/
-│   ├── init_mssql.sql              # MSSQL DDL + seed data (auto-run on container start)
+│   ├── init_mssql.sql              # MSSQL DDL + seed data (no counterparty — moved to MDM)
 │   ├── init_clickhouse.sql         # ClickHouse DDL (auto-run on container start)
+│   ├── init_mdm_postgres.sql       # MDM Postgres DDL + seed data (golden_record, incoming_record, stewardship_queue)
 │   ├── powerbi_views_mssql.sql     # Flat/denormalized views for Power BI / Superset
 │   ├── powerbi_views_clickhouse.sql# ClickHouse views for Power BI / Superset
 │   └── superset_rebuild_dashboards.py  # Recreates Superset dashboards via API
@@ -641,7 +742,23 @@ inthesauce/
 │   ├── etrm_diagram.md             # System explanation
 │   ├── network_diagram.md          # VPC/subnet layout
 │   ├── powerbi_setup.md            # Power BI Desktop VM setup + connection guide
-│   └── learning_roadmap.md         # How to reverse-engineer this stack to learn it
+│   ├── learning_roadmap.md         # How to reverse-engineer this stack to learn it
+│   └── labs/
+│       ├── lab1_databases.md           # MSSQL + ClickHouse + MDM Postgres
+│       ├── lab2_kafka.md               # Topics, consumer lag, produce/consume
+│       ├── lab3_superset_reporting.md  # Build business reports
+│       ├── lab4_pnl_investigation.md   # Trace a P&L discrepancy end-to-end
+│       ├── lab5_terraform.md           # Infrastructure as Code with LocalStack
+│       ├── lab6_monitoring.md          # Grafana + Prometheus dashboards & alerts
+│       ├── lab7_cicd.md                # GitHub Actions CI pipeline
+│       ├── lab8_networking.md          # VPC, subnets, security groups
+│       ├── lab9_mdm.md                 # Golden records, match/merge, stewardship
+│       ├── lab10_go_trade_service.md   # Build REST API + trade explosion engine
+│       ├── lab11_incident_response.md  # Simulate & fix "P&L is wrong" incident
+│       ├── lab12_performance_tuning.md # Profile & optimize queries 100x faster
+│       ├── lab13_settlement_invoicing.md # Settlement lifecycle & invoice matching
+│       ├── lab14_kafka_streaming_pipeline.md # Real-time market data pipeline
+│       └── lab15_system_design.md      # Architect a full ETRM (capstone)
 │
 └── IMPLEMENTATION_PLAN.md          # This file
 ```
@@ -684,6 +801,10 @@ services:
   localstack:
     image: localstack/localstack:3.1
     ports: ["4566:4566"]
+
+  mdm-postgres:
+    image: postgres:16-alpine
+    ports: ["5432:5432"]
 ```
 
 ### Go Dependencies
@@ -727,6 +848,7 @@ KAFKA_TOPIC_TRADES=trade.events
 KAFKA_TOPIC_PRICES=market.prices
 KAFKA_TOPIC_SETTLEMENT=settlement.run
 KAFKA_TOPIC_PNL=pnl.calc
+KAFKA_TOPIC_COUNTERPARTY=counterparty.updated
 KAFKA_GROUP_ID=etrm-service
 
 # ── Redis ──
@@ -748,6 +870,10 @@ GF_SECURITY_ADMIN_PASSWORD=admin
 # ── Service ──
 SERVICE_PORT=8080
 LOG_LEVEL=debug
+
+# ── MDM Service ──
+MDM_SERVICE_URL=http://localhost:8081
+MDM_POSTGRES_URL=postgres://mdm:mdmpass@localhost:5432/mdm
 
 # ── Risk Parameters ──
 DEFAULT_CREDIT_LIMIT=2000000
@@ -779,6 +905,11 @@ VAR_CONFIDENCE_LEVEL=0.95
 | **Full APAC holiday calendars** | Need accurate per-market data; hardcode a few for now | Populate from public holiday APIs |
 | **Mark-to-model (in-house curve)** | Needs quant expertise; MTM from exchange data is sufficient | When domain knowledge improves |
 | **Trade audit trail** | S3 write stubs exist; full audit logging is a Day 5 concern | Week 2 |
+| **LEI lookup** | Real Legal Entity Identifier validation requires a paid API | When you have access to GLEIF free tier |
+| **Full fuzzy matching library** | Levenshtein/Jaro-Winkler adds complexity; simple string match teaches the concept | Week 5+: add `go-text/similarity` |
+| **Stewardship UI** | A proper React UI takes a full day; Grafana dashboard + API calls demonstrate the concept | Week 5+: build a simple React form |
+| **Multi-entity MDM** | Only counterparty is extracted; market areas and curves stay in ETRM | Week 6+: extract `curve` table too |
+| **MDM audit trail** | Change history on golden records is important in production; skipped here | Week 3: add `golden_record_history` table |
 
 ---
 
@@ -847,4 +978,9 @@ Only what you need to write the code:
 | **Half-hour interval** | The atomic time unit. Every trade is exploded into 30-min slots. |
 | **issue_datetime** | When a data point was recorded. Key for dedup and time-travel in ClickHouse. |
 | **Imbalance** | Physical trades must net to zero. Grid operator charges fee for deviation. |
-| **Credit limit** | Max exposure per counterparty. Block trades that would exceed it. |
+| **Credit limit** | Max exposure per counterparty. Now managed by MDM, fetched via API or Redis cache. |
+| **Golden record** | The canonical, deduplicated counterparty record in MDM. One per real-world entity. |
+| **Incoming record** | A raw counterparty record from a source system. Gets matched/merged into a golden record. |
+| **Match/merge** | MDM engine that scores how well an incoming record matches existing golden records. Auto-merge if high confidence, queue for stewardship if ambiguous. |
+| **Stewardship** | Human review of conflicts the match engine couldn't auto-resolve (e.g., conflicting credit limits from two sources). |
+| **counterparty_mdm_id** | The FK in MSSQL `trade` table that references MDM's `golden_record.mdm_id`. Replaced the old `counterparty_id INT`. |

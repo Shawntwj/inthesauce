@@ -40,10 +40,10 @@ def find_db(name):
 def upsert_dataset(db_id, table_name, schema):
     # Check if already exists
     r = s.get(f"{BASE}/api/v1/dataset/", params={"q": json.dumps({
-        "filters": [{"col": "table_name", "opr": "eq", "val": table_name}]
+        "filters": [{"col": "table_name", "opr": "eq", "value": table_name}],
     })})
     for ds in r.json().get("result", []):
-        if ds["table_name"] == table_name and ds["database"]["id"] == db_id:
+        if ds["table_name"] == table_name:
             print(f"  ~ Dataset '{table_name}' exists → id={ds['id']}")
             return ds["id"]
 
@@ -57,6 +57,17 @@ def upsert_dataset(db_id, table_name, schema):
         ds_id = r.json().get("id")
         print(f"  ✓ Dataset '{table_name}' created → id={ds_id}")
         return ds_id
+    elif r.status_code == 422 and "already exists" in r.text:
+        # Dataset exists but wasn't found in search — search without db filter
+        r2 = s.get(f"{BASE}/api/v1/dataset/", params={"q": json.dumps({
+            "filters": [{"col": "table_name", "opr": "eq", "value": table_name}],
+        })})
+        for ds in r2.json().get("result", []):
+            if ds["table_name"] == table_name:
+                print(f"  ~ Dataset '{table_name}' exists (recovered) → id={ds['id']}")
+                return ds["id"]
+        print(f"  [ERR] Dataset '{table_name}': exists but could not find id")
+        return None
     else:
         print(f"  [ERR] Dataset '{table_name}': {r.status_code} {r.text[:200]}")
         return None
@@ -100,19 +111,50 @@ def create_dashboard(title, chart_ids):
         }
         positions[row_id]["children"].append(chart_key)
 
+    # json_metadata tells Superset which charts are in this dashboard
+    meta = {
+        "timed_refresh_immune_slices": [],
+        "expanded_slices": {},
+        "refresh_frequency": 0,
+        "default_filters": "{}",
+        "color_scheme": "",
+    }
     r = s.post(f"{BASE}/api/v1/dashboard/", json={
         "dashboard_title": title,
         "published": True,
         "position_json": json.dumps(positions),
-        "slices": [{"id": cid} for cid in chart_ids if cid],
+        "json_metadata": json.dumps(meta),
     })
     if r.status_code in (200, 201):
         did = r.json().get("id")
         print(f"  ✓ Dashboard '{title}' → id={did}  →  {BASE}/superset/dashboard/{did}/")
+        # Link charts to dashboard via SQLite (the REST API doesn't support this)
+        link_charts_to_dashboard(did, chart_ids)
         return did
     else:
         print(f"  [ERR] Dashboard '{title}': {r.status_code} {r.text[:300]}")
         return None
+
+def link_charts_to_dashboard(dashboard_id, chart_ids):
+    """Insert chart-dashboard associations directly into the Superset SQLite DB."""
+    import sqlite3
+    db_path = "/app/superset_home/superset.db"
+    try:
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        for cid in chart_ids:
+            if cid is None:
+                continue
+            c.execute(
+                "INSERT OR IGNORE INTO dashboard_slices (dashboard_id, slice_id) VALUES (?, ?)",
+                (dashboard_id, cid)
+            )
+        conn.commit()
+        conn.close()
+        linked = [cid for cid in chart_ids if cid]
+        print(f"    ↳ Linked {len(linked)} charts to dashboard {dashboard_id}")
+    except Exception as e:
+        print(f"    ↳ [WARN] Could not link charts: {e}")
 
 
 def main():
@@ -129,7 +171,7 @@ def main():
     ds_pnl       = upsert_dataset(ch_id, "vw_pnl_by_trade",         "etrm")
     ds_pnl_daily = upsert_dataset(ch_id, "vw_pnl_daily",            "etrm")
     ds_trade     = upsert_dataset(ms_id, "trade",                   "dbo")
-    ds_cpty      = upsert_dataset(ms_id, "counterparty",            "dbo")
+    # Counterparty data is now in MDM Postgres (golden_record table), not MSSQL
     ds_invoice   = upsert_dataset(ms_id, "invoice",                 "dbo")
     print()
 
@@ -177,16 +219,12 @@ def main():
         "subheader": "Active trades on book",
         "time_range": "No filter",
     })
-    c6 = create_chart("Active Counterparties", "big_number_total", ds_cpty, {
-        "viz_type": "big_number_total",
-        "metric": metric_cnt("counterparty_id", "Counterparties"),
-        "subheader": "Registered counterparties",
-        "time_range": "No filter",
-    })
+    # Counterparty chart removed — counterparty data is now in MDM Postgres (golden_record table)
+    c6 = None
     c7 = create_chart("Trades by Counterparty", "pie", ds_trade, {
         "viz_type": "pie",
         "metric": metric_cnt("trade_id", "Trade Count"),
-        "groupby": ["counterparty_id"],
+        "groupby": ["counterparty_mdm_id"],
         "time_range": "No filter",
         "show_legend": True, "show_labels": True,
     })

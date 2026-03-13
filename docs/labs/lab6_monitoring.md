@@ -194,9 +194,28 @@ docker compose start clickhouse
 
 ---
 
-## Part D — Understand What Ops Monitors on the Job (5 min)
+## Part D — The RED Method: How Experts Think About Monitoring (10 min)
 
-On a real trading desk, the ops dashboard shows:
+The **RED method** is the industry standard for monitoring any service. Every panel on your dashboard should measure one of these:
+
+| Letter | Metric | What It Answers | Example |
+|--------|--------|----------------|---------|
+| **R**ate | Requests per second | How much traffic is the service handling? | `rate(http_requests_total[5m])` |
+| **E**rrors | Error rate (% of requests failing) | Is the service healthy? | `rate(http_requests_total{status=~"5.."}[5m])` |
+| **D**uration | Latency (p50, p95, p99) | How fast is the service responding? | `histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))` |
+
+### Task D1: Apply RED to our stack
+
+Even without the Go service, you can apply RED thinking:
+
+| Service | Rate | Errors | Duration |
+|---------|------|--------|----------|
+| ClickHouse | `rate(ClickHouseProfileEvents_Query[5m])` | `rate(ClickHouseProfileEvents_FailedQuery[5m])` | Check `system.query_log` for `query_duration_ms` |
+| Prometheus | `rate(prometheus_http_requests_total[5m])` | `rate(prometheus_http_requests_total{code=~"5.."}[5m])` | `prometheus_http_request_duration_seconds` |
+
+Run these in the Prometheus Graph tab to see real values.
+
+### Task D2: What ops monitors on a real trading desk
 
 | Panel | Data Source | Why It Matters |
 |-------|-----------|----------------|
@@ -210,6 +229,26 @@ On a real trading desk, the ops dashboard shows:
 **Question:** A trader complains that P&L numbers haven't updated in 20 minutes. What panels do you check first?
 (Answer: Kafka consumer lag, then ClickHouse query latency, then Go service error rate. The most likely cause is Kafka lag — market prices aren't flowing, so P&L can't recalculate.)
 
+### Task D3: Study what a good dashboard looks like
+
+Before you can build good dashboards, you need to see good dashboards. A production ops dashboard follows this layout:
+
+```
+Row 1 — Health at a glance:
+[ Service Up/Down (stat) ] [ Active Trades (stat) ] [ Open Stewardship Items (stat) ]
+
+Row 2 — RED metrics:
+[ Request Rate (timeseries) ] [ Error Rate (timeseries) ] [ P95 Latency (timeseries) ]
+
+Row 3 — Business data:
+[ P&L by Trade (bar) ] [ Market Prices (timeseries) ]
+
+Row 4 — Infrastructure:
+[ CH Memory (timeseries) ] [ CH Queries/sec (timeseries) ] [ Disk Usage (gauge) ]
+```
+
+**Exercise:** Rearrange your dashboard from Part B to follow this pattern. The order matters: health → RED → business → infra. An on-call engineer scanning at 3am reads top-to-bottom — they need to know "is it up?" before "what's the P&L?"
+
 ---
 
 ## Checkpoint: What You Should Be Able to Do
@@ -219,4 +258,6 @@ On a real trading desk, the ops dashboard shows:
 - [ ] Create a Grafana dashboard with panels from Prometheus, ClickHouse, and MSSQL
 - [ ] Use `rate()` on a counter to get a per-second rate
 - [ ] Set up a Grafana alert rule with a threshold and duration
+- [ ] Explain the RED method (Rate, Errors, Duration) and apply it to ClickHouse
 - [ ] Explain what an ops engineer monitors for a trading platform and why
+- [ ] Lay out a dashboard in the correct order: health → RED → business → infra

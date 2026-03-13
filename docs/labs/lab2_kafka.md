@@ -16,6 +16,7 @@ docker exec etrm-kafka kafka-topics \
 
 **Expected output:**
 ```
+counterparty.updated
 market.prices
 pnl.calc
 settlement.run
@@ -36,11 +37,22 @@ Read the output. Note:
 - What is the **replication factor**?
 - What does `retention.ms` tell you?
 
-### Task A3: Check consumer lag
+### Task A3: Check consumer groups and lag
+
+First, list all consumer groups:
 ```bash
 docker exec etrm-kafka kafka-consumer-groups \
   --bootstrap-server localhost:9092 \
-  --describe --group etrm-service
+  --list
+```
+
+> **Note:** If no consumer groups appear, that's expected — the Go service isn't built yet. Consumer groups are created when a service (or console consumer with `--group`) starts consuming. You'll create one in Part C.
+
+If any groups exist, inspect one:
+```bash
+docker exec etrm-kafka kafka-consumer-groups \
+  --bootstrap-server localhost:9092 \
+  --describe --group <group-name>
 ```
 
 **Read the output:**
@@ -48,7 +60,7 @@ docker exec etrm-kafka kafka-consumer-groups \
 - `LOG-END-OFFSET` — last message in the topic
 - `LAG` — how many messages behind the consumer is
 
-**Question:** Is `LAG = 0`? If yes, the Go service is caught up. If no, why might it be behind?
+**Question:** What does LAG = 0 mean vs LAG = 50? (Answer: LAG = 0 means the consumer is caught up. LAG = 50 means 50 messages arrived that haven't been processed yet — the consumer is behind.)
 
 ---
 
@@ -88,7 +100,7 @@ docker exec -it etrm-kafka kafka-console-producer \
 
 Now type this JSON and press Enter:
 ```json
-{"event_type":"trade.created","trade_id":99,"unique_id":"TEST-LAB2","counterparty_id":1,"area_id":1}
+{"event_type":"trade.created","trade_id":99,"unique_id":"TEST-LAB2","counterparty_mdm_id":"MDM-001","area_id":1}
 ```
 
 Press `Ctrl+C` to exit the producer.
@@ -144,6 +156,56 @@ Think through this scenario:
 
 ---
 
+## Part D — Trace a Record End-to-End (10 min)
+
+This is the most important technique in distributed systems: **trace a single record from source to sink.**
+
+### Task D1: Publish a counterparty update and trace it
+
+1. **Publish to Kafka** (simulating the MDM service):
+```bash
+echo '{"event_type":"counterparty.updated","mdm_id":"MDM-001","canonical_name":"Tokyo Energy Corp","credit_limit":5500000,"currency":"JPY","updated_by":"kenji.tanaka"}' | \
+docker exec -i etrm-kafka kafka-console-producer \
+  --bootstrap-server localhost:9092 \
+  --topic counterparty.updated
+```
+
+2. **Verify it arrived in Kafka:**
+```bash
+docker exec etrm-kafka kafka-console-consumer \
+  --bootstrap-server localhost:9092 \
+  --topic counterparty.updated \
+  --from-beginning --max-messages 5
+```
+
+3. **Check the golden record in MDM Postgres** (open DBeaver → `localhost:5432`):
+```sql
+SELECT mdm_id, canonical_name, credit_limit, updated_at
+FROM golden_record WHERE mdm_id = 'MDM-001';
+```
+
+The credit limit is still ¥5M — because we only published a *Kafka event*, we didn't update the database. In production, the MDM service updates the DB *first*, then publishes the event. The event is a *notification*, not the source of truth.
+
+**Key insight:** This is why the pattern is "write to DB → publish event", not "publish event → hope someone writes to DB." The database is the source of truth. Kafka is the notification bus.
+
+### Task D2: Understand the full data flow on paper
+
+Trace what happens when the credit team updates a counterparty's credit limit:
+
+```
+Credit Team System → POST /counterparties/ingest to MDM Service
+  → MDM Service: match engine scores the incoming record
+  → If score >= 90: auto-merge → UPDATE golden_record
+  → MDM Service: publish to Kafka topic "counterparty.updated"
+  → Trade Service: Kafka consumer receives the event
+  → Trade Service: updates Redis cache with new credit limit
+  → Next trade booking: credit check uses Redis → sees new limit
+```
+
+**Exercise:** What if step 4 (Kafka publish) fails after step 3 (DB update)? The golden record has the new limit but downstream services don't know. This is called a **dual-write problem**. Solutions: transactional outbox pattern, or retry the publish.
+
+---
+
 ## Checkpoint: What You Should Be Able to Do
 
 - [ ] List all Kafka topics and describe what each carries
@@ -151,3 +213,5 @@ Think through this scenario:
 - [ ] Consume messages from a topic and read the output
 - [ ] Publish a message manually and verify it arrived
 - [ ] Explain what happens to queued messages when a consumer recovers
+- [ ] Trace a record end-to-end: Kafka event → database → downstream system
+- [ ] Explain why the pattern is "write to DB first, then publish event"

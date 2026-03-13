@@ -134,7 +134,7 @@ Now test: can Superset still reach MSSQL?
 # (don't do this — it will break the sandbox)
 ```
 
-**Important:** Don't disconnect containers from the default network — it will break the sandbox. This exercise is conceptual. The key takeaway: network isolation is enforced at the infrastructure level (AWS VPC + security groups), not at the Docker level in development.
+**Important:** Don't disconnect containers from the default network — it will break the sandbox. The key takeaway: network isolation is enforced at the infrastructure level (AWS VPC + security groups), not at the Docker level in development.
 
 Clean up:
 ```bash
@@ -143,6 +143,36 @@ docker network disconnect etrm-data etrm-clickhouse 2>/dev/null
 docker network disconnect etrm-app etrm-superset 2>/dev/null
 docker network rm etrm-data etrm-app 2>/dev/null
 ```
+
+### Task B4: Design network segmentation for Docker Compose
+
+In production, you'd split services across named networks. Study this pattern:
+
+```yaml
+# What proper network segmentation looks like in Docker Compose
+# (don't apply this — it's for understanding)
+networks:
+  data-tier:    # databases only
+  app-tier:     # services that talk to databases
+  messaging:    # Kafka
+  monitoring:   # Prometheus + Grafana
+
+services:
+  mssql:
+    networks: [data-tier]            # only reachable from data-tier
+  clickhouse:
+    networks: [data-tier]
+  trade-service:
+    networks: [app-tier, data-tier, messaging]  # can reach DBs AND Kafka
+  superset:
+    networks: [app-tier, data-tier]  # can reach DBs but NOT Kafka
+  kafka:
+    networks: [messaging]            # isolated from everything except consumers
+  grafana:
+    networks: [monitoring, data-tier] # can reach DBs for SQL panels
+```
+
+**Exercise:** For each service in our `docker-compose.yml`, decide which network(s) it should be on. Ask: "Does Superset need to reach Kafka? Does Grafana need to reach Kafka? Should the MDM Postgres be reachable from Superset?" The answers define your security groups.
 
 ---
 
@@ -243,6 +273,7 @@ Zscaler is the firm's zero-trust network access (ZTNA) tool. It controls:
 - [ ] Draw a VPC diagram with public, app, data, and management subnets
 - [ ] Explain what a security group is and write a rule that allows app→data traffic
 - [ ] Calculate usable IPs for a given CIDR block
+- [ ] Design Docker Compose network segmentation (which services go on which networks)
 - [ ] Explain the difference between Zscaler ZPA and a traditional VPN
 - [ ] Explain why network segmentation matters for a trading firm
 

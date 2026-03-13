@@ -65,8 +65,9 @@ CREATE TABLE IF NOT EXISTS etrm.ppa_production (
 ORDER BY (ppa_id, interval_start, issue_datetime)
 PARTITION BY toYYYYMM(production_date);
 
--- ── Seed 30 days of synthetic market data ─────────────────────────
--- Strategy: generate 4320 rows (1440 slots × 3 areas) using numbers(4320)
+-- ── Seed 120 days of synthetic market data (Jan 1 – Apr 30) ──────────
+-- Strategy: generate 17280 rows (5760 slots × 3 areas) using numbers(17280)
+-- Covers Jan-Apr to align with trade delivery periods (Feb-Apr).
 -- area = (n % 3) + 1,  slot = base + floor(n/3) * 30 minutes
 -- Use base_price array indexed by area_id to avoid CASE with non-const rand()
 -- base prices: area1=11 (JEPX JPY/kWh), area2=80 (NEM AUD/MWh), area3=60 (NZEM NZD/MWh)
@@ -84,10 +85,10 @@ FROM (
     SELECT
         toUInt8((number % 3) + 1)                                                   AS area_id,
         toDateTime('2025-01-01 00:00:00') + INTERVAL (intDiv(number, 3) * 30) MINUTE AS slot
-    FROM numbers(4320)
+    FROM numbers(17280)
 ) AS src;
 
--- Seed MTM curves
+-- Seed MTM curves (Jan-Apr, matching market_data coverage)
 INSERT INTO etrm.mtm_curve
 SELECT
     toUInt32(area_id)                                                       AS curve_id,
@@ -100,7 +101,7 @@ FROM (
     SELECT
         toUInt8((number % 3) + 1)                                                   AS area_id,
         toDateTime('2025-01-01 00:00:00') + INTERVAL (intDiv(number, 3) * 30) MINUTE AS slot
-    FROM numbers(4320)
+    FROM numbers(17280)
 ) AS src;
 
 -- ── Seed transaction_exploded for all 5 trades ─────────────────────

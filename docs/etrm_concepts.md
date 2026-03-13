@@ -19,35 +19,39 @@ Your job as a developer: build the systems that track this accurately, in real t
 
 ---
 
-## The 5 Core Tables (MSSQL)
+## The 4 Core Tables (MSSQL) + MDM Golden Record
 
-These are the "five tables that can be touched" — the source of truth for all trades.
-
-```
-counterparty ──┐
-               ├──> trade ──> trade_component ──> delivery_profile
-               │         └──> invoice
-```
-
-### 1. counterparty
-Who the firm is trading with. Banks, utilities, other trading firms.
+These are the core tables. Trade data lives in MSSQL. Counterparty data is managed by the **MDM (Master Data Management) service** and stored in MDM Postgres.
 
 ```
-JERA (counterparty_id=1, credit_limit=5,000,000 JPY)
-AGL Energy (counterparty_id=2, credit_limit=3,000,000 AUD)
-Mercury NZ (counterparty_id=3, credit_limit=2,000,000 NZD)
+golden_record (MDM Postgres) ──┐
+                               ├──> trade ──> trade_component ──> delivery_profile
+                               │         └──> invoice
 ```
+
+### Counterparty Data (MDM Postgres — `golden_record` table)
+Who the firm is trading with. Banks, utilities, other trading firms. Counterparty data is **not** stored in MSSQL — it is managed by the MDM service and stored in MDM Postgres (`golden_record` table on port 5432).
+
+```
+Tokyo Energy Corp   (mdm_id=MDM-001, short_code=TEC, credit_limit=5,000,000 JPY)
+AUS Grid Partners   (mdm_id=MDM-002, short_code=AGP, credit_limit=3,000,000 AUD)
+NZ Renewable Trust  (mdm_id=MDM-003, short_code=NZRT, credit_limit=2,000,000 NZD)
+```
+
+Golden record fields: `mdm_id`, `canonical_name`, `short_code`, `credit_limit`, `collateral_amount`, `currency`, `is_active`, `data_steward`.
+
+When a golden record changes, the MDM service publishes a `counterparty.updated` Kafka event. The ETRM trade service consumes this event and updates its Redis cache so that trade queries can resolve counterparty names without hitting MDM Postgres directly.
 
 **Credit limit** = maximum total open exposure allowed with this counterparty.
 If a new trade would push exposure over the limit → reject the trade.
 
-### 2. trade
+### 1. trade
 The master record. One row per contract agreed with a counterparty.
 
 Key fields to understand:
 - `unique_id` — the business key (e.g. `TRD-2025-001`). What traders refer to.
 - `trade_id` — internal database ID. Not shown to users.
-- `counterparty_id` — who the trade is with
+- `counterparty_mdm_id` — MDM identifier for the counterparty (e.g. `MDM-001`)
 - `book_id` — which trading book this trade belongs to (desk, strategy)
 - `is_hypothetical` — if 1, this is a what-if scenario, not a real trade
 - `trade_at_utc` — when the trade was agreed (execution timestamp)
@@ -221,7 +225,50 @@ if current_exposure + new_trade_value > credit_limit:
 
 **Why it matters:** If a counterparty defaults, you lose all open trade value with them. The credit limit is your maximum acceptable loss.
 
-**Credit limit in sandbox:** Set on the `counterparty` table. Currently `2,000,000` for all three counterparties (in their respective currencies).
+**Credit limit in sandbox:** Set on the `golden_record` table in MDM Postgres. Check each counterparty's `credit_limit` and `currency` fields.
+
+---
+
+## MDM Lifecycle — How Counterparty Data Flows
+
+Master Data Management (MDM) is how the firm maintains a single, trusted version of each counterparty. The lifecycle:
+
+### 1. Ingest
+A source system (trading desk, broker feed, invoice system) sends a new counterparty record to the MDM service via `POST /counterparties/ingest`.
+
+```
+BROKER_FEED sends: {"raw_name": "TEC", "credit_limit": 4500000}
+```
+
+### 2. Match
+The match engine compares the incoming record against all existing golden records. It scores based on name similarity (exact short_code match, partial name match, etc.).
+
+### 3. Route
+Based on the match score:
+- **Score >= 90 → AUTO_MERGE**: High confidence — automatically link to the matched golden record. Update fields if newer.
+- **Score 60-89 → QUEUE**: Medium confidence — send to the stewardship queue for human review. The conflict (e.g. different credit limits) is stored in JSONB.
+- **Score < 60 → NEW**: No match found — create a new golden record with a new MDM ID.
+
+### 4. Stewardship (if queued)
+A data steward reviews the conflict in the stewardship queue (via Grafana dashboard or API). They decide which values to keep, then resolve the conflict. The golden record is updated.
+
+### 5. Publish
+After any golden record change (auto-merge, steward resolution, or manual update), the MDM service publishes a `counterparty.updated` event to Kafka.
+
+### 6. Cache
+The ETRM trade service consumes the Kafka event and updates its Redis cache with the latest counterparty data. This means the trade service can do credit checks without calling the MDM API every time.
+
+```
+Ingest → Match → Route → [Stewardship] → Update Golden Record → Kafka Event → Redis Cache → Credit Check
+```
+
+### MDM Tables (MDM Postgres, port 5432)
+
+| Table | Purpose |
+|---|---|
+| `golden_record` | Canonical counterparty data — one row per real-world entity |
+| `incoming_record` | Every record received from every source system, with match status and score |
+| `stewardship_queue` | Conflicts the match engine couldn't auto-resolve — waiting for human review |
 
 ---
 

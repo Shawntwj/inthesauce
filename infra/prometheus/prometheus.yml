@@ -19,6 +19,12 @@ scrape_configs:
       - targets: [clickhouse:8123]
     metrics_path: /metrics
 
+  # MDM service (once built)
+  - job_name: mdm-service
+    static_configs:
+      - targets: [mdm-service:8081]
+    metrics_path: /metrics
+
   # Kafka via JMX exporter (add later — stub for now)
   # - job_name: kafka
   #   static_configs:

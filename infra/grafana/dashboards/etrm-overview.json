@@ -1,0 +1,452 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "ETRM Sandbox — Overview dashboard with market data, P&L, MDM health, and infrastructure metrics",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Infrastructure Health",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "title": "Service Up/Down",
+      "description": "Shows which Prometheus scrape targets are healthy (1) or down (0)",
+      "type": "stat",
+      "datasource": { "uid": "prometheus", "type": "prometheus" },
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } }, "type": "value" }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "up",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Prometheus Scrape Duration",
+      "description": "How long each scrape target takes to respond",
+      "type": "timeseries",
+      "datasource": { "uid": "prometheus", "type": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "scrape_duration_seconds",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Prometheus Target Count",
+      "description": "Number of targets being scraped",
+      "type": "stat",
+      "datasource": { "uid": "prometheus", "type": "prometheus" },
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "expr": "count(up)",
+          "legendFormat": "Targets",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Market Data & Pricing",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "title": "Market Prices by Area (Latest)",
+      "description": "Average daily market price per area from ClickHouse market_data table. Uses FINAL for ReplacingMergeTree dedup.",
+      "type": "timeseries",
+      "datasource": { "uid": "clickhouse", "type": "grafana-clickhouse-datasource" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "JEPX (JPY/kWh)" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "#FF6384", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "NEM (AUD/MWh)" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "#36A2EB", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "NZEM (NZD/MWh)" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "#4BC0C0", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT\n  toDate(value_datetime) AS time,\n  CASE area_id WHEN 1 THEN 'JEPX (JPY/kWh)' WHEN 2 THEN 'NEM (AUD/MWh)' WHEN 3 THEN 'NZEM (NZD/MWh)' END AS area,\n  avg(price) AS avg_price\nFROM etrm.market_data FINAL\nGROUP BY time, area_id, area\nORDER BY time, area_id",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Market Price Distribution",
+      "description": "Price range (min/max/avg) per market area",
+      "type": "bargauge",
+      "datasource": { "uid": "clickhouse", "type": "grafana-clickhouse-datasource" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT\n  CASE area_id WHEN 1 THEN 'JEPX' WHEN 2 THEN 'NEM' WHEN 3 THEN 'NZEM' END AS area,\n  round(avg(price), 2) AS avg_price,\n  round(min(price), 2) AS min_price,\n  round(max(price), 2) AS max_price\nFROM etrm.market_data FINAL\nGROUP BY area_id, area\nORDER BY area_id",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "P&L Summary",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "title": "Realized P&L by Trade",
+      "description": "Sum of realized P&L per trade from exploded transactions (settled intervals only)",
+      "type": "bargauge",
+      "datasource": { "uid": "clickhouse", "type": "grafana-clickhouse-datasource" },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 19 },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0 },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT\n  unique_id AS trade,\n  round(sum(realized_pnl), 2) AS realized_pnl\nFROM etrm.transaction_exploded FINAL\nWHERE realized_pnl IS NOT NULL\nGROUP BY unique_id\nORDER BY unique_id",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Unrealized P&L by Trade",
+      "description": "Sum of unrealized P&L per trade from exploded transactions (open intervals only)",
+      "type": "bargauge",
+      "datasource": { "uid": "clickhouse", "type": "grafana-clickhouse-datasource" },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 19 },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0 },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT\n  unique_id AS trade,\n  round(sum(unrealized_pnl), 2) AS unrealized_pnl\nFROM etrm.transaction_exploded FINAL\nWHERE unrealized_pnl IS NOT NULL\nGROUP BY unique_id\nORDER BY unique_id",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "MDM Health",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "title": "Golden Records",
+      "description": "Total active golden records in MDM Postgres",
+      "type": "stat",
+      "datasource": { "uid": "mdm-postgres", "type": "postgres" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 26 },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COUNT(*) AS golden_records FROM golden_record WHERE is_active = true;",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Open Stewardship Items",
+      "description": "Conflicts awaiting human resolution",
+      "type": "stat",
+      "datasource": { "uid": "mdm-postgres", "type": "postgres" },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 26 },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 3 },
+              { "color": "red", "value": 10 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COUNT(*) AS open_conflicts FROM stewardship_queue WHERE status = 'OPEN';",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Match Status Distribution",
+      "description": "Breakdown of incoming record match statuses (AUTO_MERGED, QUEUED, NEW)",
+      "type": "piechart",
+      "datasource": { "uid": "mdm-postgres", "type": "postgres" },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 26 },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "pieType": "donut",
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT match_status, COUNT(*) AS count FROM incoming_record GROUP BY match_status ORDER BY count DESC;",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Auto-Merge Rate",
+      "description": "Percentage of incoming records that auto-merged (target: 70-85%)",
+      "type": "gauge",
+      "datasource": { "uid": "mdm-postgres", "type": "postgres" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 26 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 60 },
+              { "color": "green", "value": 70 },
+              { "color": "yellow", "value": 90 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "auto",
+        "showThresholdLabels": true,
+        "showThresholdMarkers": true
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT ROUND(COUNT(*) FILTER (WHERE match_status = 'AUTO_MERGED') * 100.0 / NULLIF(COUNT(*), 0), 1) AS auto_merge_rate FROM incoming_record;",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Credit Utilisation by Counterparty",
+      "description": "Golden record credit limits from MDM Postgres",
+      "type": "table",
+      "datasource": { "uid": "mdm-postgres", "type": "postgres" },
+      "gridPos": { "h": 4, "w": 12, "x": 0, "y": 30 },
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "credit_limit", "desc": true }]
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT mdm_id, canonical_name, short_code, credit_limit, currency, data_steward, updated_at FROM golden_record WHERE is_active = true ORDER BY credit_limit DESC;",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Incoming Records Timeline",
+      "description": "When incoming records were received, colored by match status",
+      "type": "stat",
+      "datasource": { "uid": "mdm-postgres", "type": "postgres" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 30 },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COUNT(*) AS total_incoming FROM incoming_record;",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["etrm", "mdm", "sandbox"],
+  "templating": { "list": [] },
+  "time": { "from": "now-7d", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "ETRM Overview",
+  "uid": "etrm-overview",
+  "version": 1
+}

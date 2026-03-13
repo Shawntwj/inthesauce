@@ -71,14 +71,14 @@ Go to **Charts → + Chart**.
 - Save it
 
 ### Chart 2: Exposure by Counterparty (Pie chart)
-- **Dataset:** `vw_trade_blotter` (ETRM MSSQL) — this view already joins counterparty names
+- **Dataset:** `vw_trade_blotter` (ETRM MSSQL) — this view includes `counterparty_mdm_id`
 - **Chart type:** Pie Chart
-- **Dimension:** `counterparty_name` (NOT `counterparty_id` — numeric IDs are meaningless to traders)
+- **Dimension:** `counterparty_mdm_id` (map to names: MDM-001=TEC, MDM-002=AGP, MDM-003=NZRT)
 - **Metric:** SUM of `notional_value`
 - **Title:** "Notional Exposure by Counterparty"
 - Save it
 
-> **Tip:** If a dataset only has `counterparty_id`, you need a view or SQL query that JOINs to the `counterparty` table. Never show raw IDs in a business report — always show names.
+> **Tip:** Counterparty names are in MDM Postgres (`golden_record` table), not MSSQL. If your view only has `counterparty_mdm_id`, consider creating a view that maps MDM IDs to names using a lookup, or use the Redis cache.
 
 ### Chart 3: Current Market Prices (Big Numbers — one per market)
 Create 3 separate **Big Number** charts:
@@ -157,7 +157,7 @@ In a real firm, you'd share this URL with the trader or embed it in their intern
 
 ### Extension 1: Add a table of all trades
 - Add a **Table** chart using the `trade` dataset (MSSQL)
-- Columns: `unique_id`, `counterparty_id`, `is_active`, `trade_at_utc`
+- Columns: `unique_id`, `counterparty_mdm_id`, `is_active`, `trade_at_utc`
 - Add to the dashboard
 
 ### Extension 2: Build the same dashboard in SQL Lab

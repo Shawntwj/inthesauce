@@ -25,10 +25,11 @@ This is the **event-driven** pattern. Kafka is the message bus.
 
 | Topic | Published By | Consumed By | What It Carries |
 |---|---|---|---|
-| `trade.events` | Go service (POST /trades) | Go service (exploder, credit check) | Full trade payload — counterparty, components, delivery details |
+| `trade.events` | Go service (POST /trades) | Go service (exploder, credit check) | Full trade payload — counterparty MDM ID, components, delivery details |
 | `market.prices` | Market data scraper (synthetic) | Go service (MTM updater) | Half-hourly prices per area: `{area_id, value_datetime, price, volume}` |
 | `settlement.run` | Cron / manual trigger | Go service (settlement engine) | Settlement run command: `{trade_id, period_start, period_end}` |
 | `pnl.calc` | Go service (after market price update) | Go service (P&L engine) | P&L recalc request: `{trade_id, as_of_datetime}` |
+| `counterparty.updated` | MDM service (port 8081) | ETRM trade service (Redis cache updater) | Golden record change: `{mdm_id, canonical_name, short_code, credit_limit, currency, is_active}` |
 
 ---
 
@@ -99,7 +100,7 @@ docker exec -it etrm-kafka kafka-console-producer \
   --topic trade.events
 
 # Now type a JSON message and press Enter:
-{"trade_id": 99, "unique_id": "TEST-001", "counterparty_id": 1, "action": "test"}
+{"trade_id": 99, "unique_id": "TEST-001", "counterparty_mdm_id": "MDM-001", "action": "test"}
 ```
 If the Go service is running, it will try to consume and process this message.
 
@@ -126,16 +127,63 @@ POST /trades  →  validate  →  save to MSSQL  →  publish to trade.events  �
 ### Consumer (processing events)
 A goroutine runs in the background listening to each topic:
 ```
-trade.events   →  explode trade to ClickHouse half-hour intervals
-market.prices  →  update mtm_price in transaction_exploded
-settlement.run →  generate invoices for completed trades
-pnl.calc       →  recalculate P&L and write updated rows to ClickHouse
+trade.events          →  explode trade to ClickHouse half-hour intervals
+market.prices         →  update mtm_price in transaction_exploded
+settlement.run        →  generate invoices for completed trades
+pnl.calc              →  recalculate P&L and write updated rows to ClickHouse
+counterparty.updated  →  update Redis cache with latest golden record from MDM
 ```
 
 ### Why async?
 - Trade explosion might create 1,000+ ClickHouse rows — too slow to do synchronously in the API call
 - Market price updates come every 30 seconds — processing them one at a time in the API would block everything else
 - If ClickHouse is temporarily slow, messages queue in Kafka and catch up later
+
+---
+
+## Deep Dive: counterparty.updated Topic
+
+This topic is the bridge between the MDM service and the ETRM trade service. When a golden record changes (auto-merge, steward resolution, or manual update), the MDM service publishes an event here.
+
+### Message format
+```json
+{
+  "mdm_id": "MDM-001",
+  "canonical_name": "Tokyo Energy Corp",
+  "short_code": "TEC",
+  "credit_limit": 6000000,
+  "currency": "JPY",
+  "is_active": true
+}
+```
+
+### Publish a test event
+```bash
+echo '{"mdm_id":"MDM-001","canonical_name":"Tokyo Energy Corp","short_code":"TEC","credit_limit":6000000,"currency":"JPY","is_active":true}' | \
+docker exec -i etrm-kafka kafka-console-producer \
+  --bootstrap-server localhost:9092 \
+  --topic counterparty.updated
+```
+
+### Consume it back
+```bash
+docker exec etrm-kafka kafka-console-consumer \
+  --bootstrap-server localhost:9092 \
+  --topic counterparty.updated \
+  --from-beginning \
+  --max-messages 5
+```
+
+### What the ETRM trade service does with this event
+1. Receives the message from the `counterparty.updated` topic
+2. Parses the JSON into a `GoldenRecord` struct
+3. Writes to Redis: `SET counterparty:MDM-001 <json> EX 3600` (1-hour TTL)
+4. Next credit check for MDM-001 reads from Redis instead of calling the MDM API
+
+### Why this pattern matters
+- **Decoupling:** ETRM doesn't depend on MDM being up for every credit check
+- **Speed:** Redis read (~1ms) vs MDM API call (~50ms)
+- **Consistency:** Eventual — if MDM updates a credit limit, there's a brief window where ETRM uses the old value (until the Kafka event arrives and Redis updates)
 
 ---
 

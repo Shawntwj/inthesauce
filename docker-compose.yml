@@ -1,7 +1,7 @@
 version: "3.9"
 
 # ─────────────────────────────────────────────────────────────────
-# ETRM Sandbox — Apple Silicon (ARM64) compatible
+# ETRM + MDM Sandbox — Apple Silicon (ARM64) compatible
 # Run: docker compose up -d
 # Stop: docker compose down
 # Wipe volumes: docker compose down -v
@@ -23,6 +23,8 @@ services:
     volumes:
       - mssql_data:/var/opt/mssql
       - ./scripts/init_mssql.sql:/docker-entrypoint-initdb.d/init_mssql.sql
+    networks:
+      - data-tier
     healthcheck:
       # Azure SQL Edge doesn't bundle sqlcmd — use a TCP port check instead
       test: bash -c "cat /dev/null > /dev/tcp/localhost/1433" 2>/dev/null && echo ok || exit 1
@@ -49,6 +51,8 @@ services:
       - clickhouse_data:/var/lib/clickhouse
       - ./scripts/init_clickhouse.sql:/docker-entrypoint-initdb.d/init_clickhouse.sql
       - ./infra/clickhouse/config.xml:/etc/clickhouse-server/config.d/custom.xml
+    networks:
+      - data-tier
     healthcheck:
       test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
       interval: 10s
@@ -78,6 +82,8 @@ services:
     volumes:
       - zookeeper_data:/var/lib/zookeeper/data
       - zookeeper_log:/var/lib/zookeeper/log
+    networks:
+      - messaging
     healthcheck:
       test: echo ruok | timeout 5 bash -c "cat > /dev/tcp/localhost/2181" && echo "ok" || exit 1
       interval: 10s
@@ -107,8 +113,13 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_LOG_RETENTION_HOURS: 168
+      # Pre-create topics via KAFKA_CREATE_TOPICS (comma-separated)
+      # counterparty.updated is consumed by the ETRM trade service for MDM cache
+      KAFKA_CREATE_TOPICS: "trade.events:3:1,market.prices:3:1,settlement.run:1:1,pnl.calc:1:1,counterparty.updated:3:1"
     volumes:
       - kafka_data:/var/lib/kafka/data
+    networks:
+      - messaging
     healthcheck:
       test: kafka-topics --bootstrap-server localhost:9092 --list
       interval: 15s
@@ -126,6 +137,8 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    networks:
+      - app-tier
     healthcheck:
       test: redis-cli ping
       interval: 10s
@@ -147,6 +160,11 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
       - --web.enable-lifecycle
+    networks:
+      - monitoring
+      - data-tier      # scrapes ClickHouse metrics
+      - app-tier       # scrapes trade-service, mdm-service metrics
+      - messaging      # future: scrapes Kafka JMX exporter
     healthcheck:
       test: wget --no-verbose --tries=1 --spider http://localhost:9090/-/healthy || exit 1
       interval: 10s
@@ -175,6 +193,9 @@ services:
       - grafana_data:/var/lib/grafana
       - ./infra/grafana/provisioning:/etc/grafana/provisioning
       - ./infra/grafana/dashboards:/var/lib/grafana/dashboards
+    networks:
+      - monitoring
+      - data-tier      # queries ClickHouse, MSSQL, MDM Postgres datasources
     healthcheck:
       test: wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1
       interval: 10s
@@ -199,6 +220,8 @@ services:
     volumes:
       - localstack_data:/var/lib/localstack
       - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - app-tier
     healthcheck:
       test: curl -s http://localhost:4566/_localstack/health | grep '"s3"' || exit 1
       interval: 10s
@@ -206,6 +229,92 @@ services:
       retries: 10
       start_period: 20s
     restart: unless-stopped
+
+  # ── MDM Postgres (counterparty golden records) ────────────────────
+  # Counterparty data lives here, NOT in MSSQL. The ETRM trade service
+  # fetches counterparty/credit data from the MDM service API.
+  mdm-postgres:
+    image: postgres:16-alpine
+    platform: linux/arm64
+    container_name: etrm-mdm-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: mdm
+      POSTGRES_USER: mdm
+      POSTGRES_PASSWORD: mdmpass
+    volumes:
+      - mdm_postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_mdm_postgres.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - data-tier
+    healthcheck:
+      test: pg_isready -U mdm -d mdm
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── Trade Service (Go — ETRM core) ──────────────────────────────
+  # Minimal stub with health endpoint, /trades, and Prometheus metrics.
+  # Students extend this in Lab 10 to wire MSSQL, ClickHouse, Kafka.
+  trade-service:
+    build: ./services/trade-service
+    container_name: etrm-trade-service
+    ports:
+      - "8080:8080"
+    depends_on:
+      mssql:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    environment:
+      PORT: "8080"
+      MSSQL_HOST: mssql
+      MSSQL_PORT: "1433"
+      MSSQL_USER: sa
+      MSSQL_PASSWORD: "${MSSQL_SA_PASSWORD:-YourStr0ngPass1}"
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "9000"
+      KAFKA_BROKERS: kafka:29092
+      MDM_SERVICE_URL: http://mdm-service:8081
+      REDIS_ADDR: redis:6379
+    networks:
+      - app-tier
+      - data-tier       # queries MSSQL + ClickHouse
+      - messaging       # publishes/consumes Kafka events
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── MDM Service (Go — master data management) ───────────────────
+  # Exposes REST API on port 8081 for counterparty CRUD, ingest,
+  # match/merge, and stewardship queue.
+  # Uncomment once you build the MDM service in Lab 10+:
+  # mdm-service:
+  #   build: ./services/mdm-service
+  #   container_name: etrm-mdm-service
+  #   ports:
+  #     - "8081:8081"
+  #   depends_on:
+  #     mdm-postgres:
+  #       condition: service_healthy
+  #     kafka:
+  #       condition: service_healthy
+  #   environment:
+  #     MDM_POSTGRES_URL: postgres://mdm:mdmpass@mdm-postgres:5432/mdm
+  #     KAFKA_BROKERS: kafka:29092
+  #     MDM_PORT: 8081
+  #   networks:
+  #     - app-tier
+  #     - data-tier
+  #     - messaging
+  #   restart: unless-stopped
 
   # ── Apache Superset (Power BI-style BI tool, browser-based) ──────
   # Access at http://localhost:8088  admin / admin
@@ -225,20 +334,23 @@ services:
     volumes:
       - superset_data:/app/superset_home
       - ./infra/superset/superset_init.sh:/superset_init.sh
+      - ./scripts/superset_provision.py:/superset_provision.py
+    networks:
+      - app-tier
+      - data-tier      # Superset queries MSSQL + ClickHouse directly
     command: >
       bash -c "
         pip install --quiet clickhouse-connect pymssql &&
         superset db upgrade &&
-        superset fab create-admin
-          --username admin
-          --firstname Admin
-          --lastname User
-          --email admin@etrm.local
-          --password admin 2>/dev/null || true &&
+        superset fab create-admin --username admin --firstname Admin --lastname User --email admin@etrm.local --password admin 2>/dev/null || true &&
         superset init &&
         /superset_init.sh &
-        superset run -h 0.0.0.0 -p 8088 --with-threads --reload --debugger
+        superset run -h 0.0.0.0 -p 8088 --with-threads
       "
+    deploy:
+      resources:
+        limits:
+          memory: 2G
     healthcheck:
       test: curl -sf http://localhost:8088/health || exit 1
       interval: 15s
@@ -259,7 +371,37 @@ volumes:
   grafana_data:
   localstack_data:
   superset_data:
+  mdm_postgres_data:
 
-# ── Networks (default bridge is fine for sandbox) ─────────────────
-# All services are on the default network and can reach each other
-# by container name (e.g. kafka:29092, mssql:1433, clickhouse:8123)
+# ── Networks ──────────────────────────────────────────────────────
+# Segmented into tiers to model production network isolation.
+# Lab 8 teaches learners to read and understand this topology.
+#
+#   data-tier:    MSSQL, ClickHouse, MDM Postgres (databases only)
+#   app-tier:     Go services, Redis (application layer)
+#   messaging:    Kafka, Zookeeper (event backbone)
+#   monitoring:   Prometheus, Grafana (observability)
+#
+# Superset bridges data-tier + app-tier (BI tool needs DB access).
+# LocalStack is on app-tier (simulates AWS services).
+networks:
+  data-tier:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.1.0/24
+  app-tier:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.2.0/24
+  messaging:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.3.0/24
+  monitoring:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.4.0/24

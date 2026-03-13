@@ -10,7 +10,7 @@
 
 It's 9am. A trader messages you:
 
-> "Hey, the P&L on trade TRD-2025-001 looks off. It's showing -¥120,000 unrealized but I thought the JEPX curve moved in our favour yesterday. Can you check?"
+> "Hey, the P&L on trade TRADE-JP-001 looks off. It's showing -¥120,000 unrealized but I thought the JEPX curve moved in our favour yesterday. Can you check?"
 
 This is a real task you'll do. Here's how to approach it systematically.
 
@@ -22,10 +22,11 @@ Open DBeaver or Superset SQL Lab → ETRM MSSQL:
 
 ```sql
 -- Get all details of the trade in question
+-- Counterparty name can be looked up from MDM Postgres by counterparty_mdm_id
 SELECT
     t.trade_id,
     t.unique_id,
-    cp.name         AS counterparty,
+    t.counterparty_mdm_id,
     tc.area_id,
     tc.settlement_mode,
     tc.product_type,
@@ -36,8 +37,7 @@ SELECT
     tc.end_date
 FROM trade t
 JOIN trade_component tc ON tc.trade_id = t.trade_id
-JOIN counterparty cp    ON cp.counterparty_id = t.counterparty_id
-WHERE t.unique_id = 'TRD-2025-001';
+WHERE t.unique_id = 'TRADE-JP-001';
 ```
 
 Note down:
@@ -46,7 +46,7 @@ Note down:
 - What period does it cover?
 - Is it PHYSICAL or FINANCIAL?
 
-If TRD-2025-001 doesn't exist in your sandbox, use whatever `unique_id` you see from:
+If TRADE-JP-001 doesn't exist in your sandbox, use whatever `unique_id` you see from:
 ```sql
 SELECT unique_id FROM trade;
 ```
@@ -71,7 +71,7 @@ SELECT
     pending_intervals,
     last_updated
 FROM etrm.vw_pnl_by_trade
-WHERE trade_ref = 'TRD-2025-001';  -- use your actual trade_ref
+WHERE trade_ref = 'TRADE-JP-001';  -- use your actual trade_ref
 ```
 
 Note the current P&L numbers and the `last_updated` timestamp.
@@ -99,7 +99,7 @@ SELECT
     is_settled,
     snapshot_time
 FROM etrm.vw_trade_intervals_flat
-WHERE trade_ref = 'TRD-2025-001'
+WHERE trade_ref = 'TRADE-JP-001'
 ORDER BY interval_start
 LIMIT 50;
 ```
@@ -183,7 +183,7 @@ LIMIT 7;
 Based on your investigation, draft a response to the trader. Use this structure:
 
 ```
-Trade: TRD-2025-001
+Trade: TRADE-JP-001
 Counterparty: [name]
 Market: [JEPX/NEM/NZEM]
 Contracted price: [price] [currency]/MWh

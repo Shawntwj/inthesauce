@@ -11,17 +11,9 @@ GO
 USE etrm;
 GO
 
--- ── counterparty ──────────────────────────────────────────────────
-CREATE TABLE counterparty (
-    counterparty_id     INT IDENTITY(1,1) PRIMARY KEY,
-    name                VARCHAR(200) NOT NULL,
-    short_code          VARCHAR(20) UNIQUE,
-    credit_limit        DECIMAL(18,2) DEFAULT 2000000.00,
-    collateral_amount   DECIMAL(18,2) DEFAULT 0.00,
-    is_active           BIT DEFAULT 1,
-    created_at          DATETIME2 DEFAULT GETUTCDATE()
-);
-GO
+-- NOTE: counterparty table has been moved to MDM Postgres.
+-- The ETRM trade service fetches counterparty/credit data from the MDM API.
+-- See scripts/init_mdm_postgres.sql for the golden_record schema.
 
 -- ── delivery_profile ──────────────────────────────────────────────
 CREATE TABLE delivery_profile (
@@ -44,7 +36,7 @@ CREATE TABLE trade (
     trade_at_utc        DATETIME2 NOT NULL,
     is_active           BIT DEFAULT 1,
     is_hypothetical     BIT DEFAULT 0,
-    counterparty_id     INT NOT NULL REFERENCES counterparty(counterparty_id),
+    counterparty_mdm_id VARCHAR(50) NOT NULL,  -- references MDM golden_record.mdm_id (e.g. 'MDM-001')
     broker_id           INT,
     clearer_id          INT,
     trader_id           INT NOT NULL DEFAULT 1,
@@ -130,13 +122,8 @@ ALTER TABLE half_hour_intervals
 GO
 
 -- ── Seed data ─────────────────────────────────────────────────────
-
--- Counterparties
-INSERT INTO counterparty (name, short_code, credit_limit)
-VALUES
-    ('Tokyo Energy Corp',     'TEC',  5000000.00),
-    ('AUS Grid Partners',     'AGP',  3000000.00),
-    ('NZ Renewable Trust',    'NZRT', 2000000.00);
+-- NOTE: Counterparties now live in MDM Postgres (golden_record table).
+-- Trades reference MDM IDs: MDM-001 (Tokyo Energy Corp), MDM-002 (AUS Grid Partners), MDM-003 (NZ Renewable Trust)
 
 -- Delivery profiles
 INSERT INTO delivery_profile (profile_name, product_type, interval_minutes, start_time, end_time)
@@ -154,14 +141,14 @@ VALUES
     ('JEPX In-House',    'MODEL',  1, 'IN_HOUSE'),
     ('NEM In-House',     'MODEL',  2, 'IN_HOUSE');
 
--- Sample trades
-INSERT INTO trade (unique_id, total_quantity, trade_at_utc, counterparty_id, trader_id, book_id)
+-- Sample trades (counterparty_mdm_id references MDM golden_record)
+INSERT INTO trade (unique_id, total_quantity, trade_at_utc, counterparty_mdm_id, trader_id, book_id)
 VALUES
-    ('TRADE-JP-001', 100.0, '2025-01-15 02:00:00', 1, 1, 1),
-    ('TRADE-AU-001',  50.0, '2025-01-20 00:00:00', 2, 1, 1),
-    ('TRADE-NZ-001',  75.0, '2025-02-01 00:00:00', 3, 1, 2),
-    ('TRADE-JP-002', 200.0, '2025-03-01 03:00:00', 1, 1, 1),
-    ('TRADE-AU-002',  80.0, '2025-03-10 00:00:00', 2, 1, 2);
+    ('TRADE-JP-001', 100.0, '2025-01-15 02:00:00', 'MDM-001', 1, 1),
+    ('TRADE-AU-001',  50.0, '2025-01-20 00:00:00', 'MDM-002', 1, 1),
+    ('TRADE-NZ-001',  75.0, '2025-02-01 00:00:00', 'MDM-003', 1, 2),
+    ('TRADE-JP-002', 200.0, '2025-03-01 03:00:00', 'MDM-001', 1, 1),
+    ('TRADE-AU-002',  80.0, '2025-03-10 00:00:00', 'MDM-002', 1, 2);
 
 -- Trade components
 INSERT INTO trade_component
@@ -173,6 +160,15 @@ VALUES
     (4, 1, 1, 'FINANCIAL', 'JPY', 'STANDARD',  200.0, 12.00, '2025-04-01', '2025-04-30'),
     (5, 2, 2, 'PHYSICAL',  'AUD', 'CONSTANT',   80.0, 85.00, '2025-04-01', '2025-04-30');
 GO
+
+-- ── Seed invoices (for Lab 13 — Settlement & Invoice Matching) ──
+INSERT INTO invoice (trade_id, component_id, invoice_number, amount, currency, invoice_date, due_date, status, matched_amount, match_status)
+VALUES
+    (1, 1, 'INV-2025-02-001', 65000.00, 'JPY', '2025-03-01', '2025-03-31', 'PENDING', NULL, NULL),
+    (2, 2, 'INV-2025-02-002', 41000.00, 'AUD', '2025-03-01', '2025-03-31', 'PENDING', NULL, NULL),
+    (3, 3, 'INV-2025-02-003', 43875.00, 'NZD', '2025-03-01', '2025-03-31', 'MATCHED', 43875.00, 'EXACT'),
+    (4, 4, 'INV-2025-04-001', 72000.00, 'JPY', '2025-05-01', '2025-05-31', 'PENDING', NULL, NULL),
+    (5, 5, 'INV-2025-04-002', 68000.00, 'AUD', '2025-05-01', '2025-05-31', 'PENDING', NULL, NULL);
 
 PRINT 'MSSQL init complete.';
 GO
